@@ -1,0 +1,10 @@
+{
+  "version": "0.2",
+  "words": [
+    "docstrings",
+    "dollarby",
+    "kwargs",
+    "pydocstyle",
+    "venv"
+  ]
+}

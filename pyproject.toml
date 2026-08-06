@@ -1,0 +1,70 @@
+[project]
+name = "dollarby"
+version = "0.1.0"
+description = "My personal tax and financing helpers"
+readme = "README.md"
+authors = [
+    { name = "Ada Wright", email = "ada@hpk.io" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "pandas>=3.0.5",
+]
+
+[project.scripts]
+dollarby = "dollarby:main"
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pandas-stubs>=3.0.5.260730",
+    "pre-commit>=4.6.1",
+    "ty>=0.0.68",
+]
+
+### Ty
+[tool.ty.rules]
+all = "error"
+
+[tool.ty.analysis]
+respect-type-ignore-comments = false
+strict-equality-semantics = true
+
+### Ruff
+[tool.ruff]
+include     = ["*.py"]
+line-length = 100
+cache-dir   = "~/.cache/ruff"
+exclude     = [".venv"]
+fix          = true
+show-fixes   = true
+indent-width = 4
+
+[tool.ruff.lint]
+# Ignore underscore-prefixed variables, args, and kwargs, in "unused-variable checks".
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?)|args|kwargs)$"
+select = [
+  "ALL", # Enable all linting rules.
+]
+ignore = [
+  "D203",   # One blank line required before class docstring
+  "EM101",  # Allow string literals in Exception("Messages")
+]
+fixable = [
+  "ALL", # All fixable rules will be automatically corrected.
+]
+
+[tool.ruff.format]
+docstring-code-format = true # Reformat code blocks in docstrings.
+
+[tool.ruff.lint.pydocstyle]
+convention = "google" # Use Google's docstring conventions.
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+  "INP001", # Suppress warnings for implicit namespace packages in test directories.
+  "S101",   # Allow usage of `assert` in tests.
+]
