@@ -11,19 +11,7 @@ import pandas as pd
 if TYPE_CHECKING:
     from pathlib import Path
 
-SOURCE_COLUMNS: Final = {
-    "Date": "date",
-    "Amount": "amount",
-    "Account Number": "account_number",
-    "Transaction Type": "transaction_type",
-    "Transaction Details": "transaction_details",
-    "Balance": "balance",
-    "Category": "source_category",
-    "Merchant Name": "merchant_name",
-    "Processed On": "processed_on",
-}
-
-STATEMENT_DATE_FORMAT: Final = "%d %b %y"
+    from dollarby.processor import StatementProcessor
 
 TEXT_COLUMNS: Final = (
     "account_number",
@@ -39,10 +27,10 @@ class StatementError(ValueError):
 
 
 class TransactionView(StrEnum):
-    """Choose which categorisation state to display."""
+    """Choose which processing state to display."""
 
-    UNCATEGORISED = "uncategorised"
-    CATEGORISED = "categorised"
+    UNPROCESSED = "unprocessed"
+    PROCESSED = "processed"
     ALL = "all"
 
 
@@ -54,36 +42,37 @@ class Statement:
     transactions: pd.DataFrame
 
     @property
-    def categorised_mask(self) -> pd.Series[bool]:
-        """Return a mask identifying transactions with Dollarby tags."""
+    def processed_mask(self) -> pd.Series[bool]:
+        """Return a mask identifying transactions with at least one tag."""
         return self.transactions["tags"].map(bool)
 
     @property
-    def categorised_count(self) -> int:
-        """Return the number of transactions with Dollarby tags."""
-        return int(self.categorised_mask.sum())
+    def processed_count(self) -> int:
+        """Return the number of transactions with at least one tag."""
+        return int(self.processed_mask.sum())
 
     @property
-    def uncategorised_count(self) -> int:
-        """Return the number of transactions without Dollarby tags."""
-        return len(self.transactions) - self.categorised_count
+    def unprocessed_count(self) -> int:
+        """Return the number of transactions which still need a tag."""
+        return len(self.transactions) - self.processed_count
 
     def select(self, view: TransactionView) -> pd.DataFrame:
-        """Select transactions for a categorisation-state view."""
+        """Select transactions for a processing-state view."""
         if view is TransactionView.ALL:
             return self.transactions
 
-        mask = self.categorised_mask
-        if view is TransactionView.UNCATEGORISED:
+        mask = self.processed_mask
+        if view is TransactionView.UNPROCESSED:
             mask = ~mask
         return self.transactions.loc[mask]
 
 
-def load_statement(path: Path) -> Statement:
+def load_statement(path: Path, processor: StatementProcessor) -> Statement:
     """Read and normalise a CSV statement.
 
     Args:
         path: CSV statement to load.
+        processor: Description of the source export and its tagging rules.
 
     Returns:
         The source path and canonical transaction dataframe.
@@ -91,35 +80,35 @@ def load_statement(path: Path) -> Statement:
     Raises:
         StatementError: The file is unreadable or does not have the expected shape.
     """
+    account_number_column = processor.source_column("account_number")
     try:
-        source = pd.read_csv(path, dtype={"Account Number": "string"})
+        source = pd.read_csv(path, dtype={account_number_column: "string"})
     except (OSError, UnicodeDecodeError, pd.errors.ParserError) as error:
         message = f"Could not read statement {path}: {error}"
         raise StatementError(message) from error
 
-    # Discard unnamed separator columns from the bank export.
-    source = source.drop(columns=_unnamed_columns(source))
-    missing_columns = SOURCE_COLUMNS.keys() - source.columns
+    column_map = processor.statement.columns
+    source = source.drop(columns=list(processor.statement.ignored_columns), errors="ignore")
+    missing_columns = column_map.keys() - source.columns
     if missing_columns:
         missing = ", ".join(sorted(missing_columns))
         message = f"Statement {path} is missing required columns: {missing}"
         raise StatementError(message)
 
     # Rename and retain only Dollarby's canonical transaction columns.
-    transactions = source.rename(columns=SOURCE_COLUMNS).loc[:, list(SOURCE_COLUMNS.values())]
+    transactions = source.rename(columns=column_map).loc[
+        :,
+        list(column_map.values()),
+    ]
 
     # Convert source strings to canonical analytical dtypes.
     try:
-        transactions["date"] = pd.to_datetime(
-            transactions["date"],
-            format=STATEMENT_DATE_FORMAT,
-            errors="raise",
-        )
-        transactions["processed_on"] = pd.to_datetime(
-            transactions["processed_on"],
-            format=STATEMENT_DATE_FORMAT,
-            errors="raise",
-        )
+        for column in processor.statement.dates.columns:
+            transactions[column] = pd.to_datetime(
+                transactions[column],
+                format=processor.statement.dates.format,
+                errors="raise",
+            )
         transactions["amount"] = pd.to_numeric(transactions["amount"], errors="raise")
         transactions["balance"] = pd.to_numeric(transactions["balance"], errors="raise")
     except (TypeError, ValueError) as error:
@@ -130,19 +119,35 @@ def load_statement(path: Path) -> Statement:
     for column in TEXT_COLUMNS:
         transactions[column] = transactions[column].fillna("").astype("string")
 
-    # Add source references and initially empty Dollarby tags.
+    # Add source references and tags inferred from the processor's ordered rules.
     transactions.insert(0, "source_row", range(2, len(transactions) + 2))
-    transactions = transactions.assign(
-        tags=pd.Series(
-            [frozenset[str]() for _ in range(len(transactions))],
-            index=transactions.index,
-            dtype="object",
-        ),
-    )
+    transactions = transactions.assign(tags=_transaction_tags(transactions, processor))
 
     return Statement(path=path, transactions=transactions)
 
 
-def _unnamed_columns(frame: pd.DataFrame) -> list[str]:
-    """Find empty CSV columns generated as ``Unnamed: n`` by pandas."""
-    return [str(column) for column in frame.columns if str(column).startswith("Unnamed:")]
+def _transaction_tags(
+    transactions: pd.DataFrame,
+    processor: StatementProcessor,
+) -> pd.Series:
+    """Apply ordered tag rules, skipping later rules after a final match."""
+    tag_sets = [set[str]() for _ in range(len(transactions))]
+    active_rows = [True for _ in range(len(transactions))]
+
+    for column_rule in processor.tagging.rules:
+        values = transactions[column_rule.column].tolist()
+        for rule in column_rule.matches:
+            pattern = rule.compile(case_sensitive=processor.tagging.case_sensitive)
+            for position, value in enumerate(values):
+                if not active_rows[position] or pattern.search(str(value)) is None:
+                    continue
+
+                tag_sets[position].update(rule.tags)
+                if rule.final:
+                    active_rows[position] = False
+
+    return pd.Series(
+        [frozenset(tags) for tags in tag_sets],
+        index=transactions.index,
+        dtype="object",
+    )

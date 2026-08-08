@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import pandas as pd
 import pytest
 
 from dollarby.data import Statement, load_statement
+from dollarby.processor import DEFAULT_PROCESSOR_PATH, StatementProcessor, load_processor
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -45,27 +45,36 @@ def statement_path(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def statement(statement_path: Path) -> Statement:
+def processor() -> StatementProcessor:
+    """Return Dollarby's initial NAB statement processor."""
+    return load_processor(DEFAULT_PROCESSOR_PATH)
+
+
+@pytest.fixture
+def statement(statement_path: Path, processor: StatementProcessor) -> Statement:
     """Return a loaded statement whose transactions have no Dollarby tags."""
-    return load_statement(statement_path)
+    return load_statement(statement_path, processor)
 
 
 @pytest.fixture
-def categorised_statement(statement: Statement) -> Statement:
-    """Return a statement with only its first transaction tagged."""
-    tags = [frozenset({"business"})]
-    tags.extend(frozenset[str]() for _ in range(len(statement.transactions) - 1))
-    transactions = statement.transactions.assign(
-        tags=pd.Series(tags, index=statement.transactions.index, dtype="object"),
+def partly_processed_statement(
+    statement_path: Path,
+    processor: StatementProcessor,
+) -> Statement:
+    """Return a statement with one automatically tagged restaurant transaction."""
+    source = statement_path.read_text(encoding="utf-8")
+    statement_path.write_text(
+        source.replace("Example Merchant 1", "Grill'd", 1),
+        encoding="utf-8",
     )
-    return Statement(path=statement.path, transactions=transactions)
+    return load_statement(statement_path, processor)
 
 
 @pytest.fixture
-def large_statement(tmp_path: Path) -> Statement:
+def large_statement(tmp_path: Path, processor: StatementProcessor) -> Statement:
     """Return enough transactions to exercise page-based TUI movement."""
     path = _write_statement(
         tmp_path / "large-statement.csv",
         transaction_count=LARGE_TRANSACTION_COUNT,
     )
-    return load_statement(path)
+    return load_statement(path, processor)

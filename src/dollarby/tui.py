@@ -17,8 +17,8 @@ if TYPE_CHECKING:
     from datetime import datetime
 
 VIEW_OPTIONS: tuple[tuple[str, TransactionView], ...] = (
-    ("Uncategorised", TransactionView.UNCATEGORISED),
-    ("Categorised", TransactionView.CATEGORISED),
+    ("Unprocessed", TransactionView.UNPROCESSED),
+    ("Processed", TransactionView.PROCESSED),
     ("All", TransactionView.ALL),
 )
 
@@ -112,7 +112,7 @@ class DollarbyApp(App[None]):
             yield Label("Show", id="view-label")
             yield Select[TransactionView](
                 VIEW_OPTIONS,
-                value=TransactionView.UNCATEGORISED,
+                value=TransactionView.ALL,
                 allow_blank=False,
                 compact=True,
                 id="transaction-view",
@@ -124,8 +124,8 @@ class DollarbyApp(App[None]):
     def on_mount(self) -> None:
         """Set up and populate the transaction table."""
         table = self.query_one("#transactions", TransactionTable)
-        table.add_columns("", "Date", "Amount", "Merchant", "Details", "Type", "Tags")
-        self._show_transactions(TransactionView.UNCATEGORISED)
+        table.add_columns("Tagged", "Date", "Amount", "Merchant", "Details", "Type", "Tags")
+        self._show_transactions(TransactionView.ALL)
         table.focus()
 
     @on(Select.Changed, "#transaction-view")
@@ -147,7 +147,7 @@ class DollarbyApp(App[None]):
             date = cast("datetime", transaction.date)
             tags = sorted(cast("frozenset[str]", transaction.tags))
             table.add_row(
-                _status(categorised=bool(tags)),
+                _status(processed=bool(tags)),
                 date.strftime("%Y-%m-%d"),
                 _amount(amount),
                 str(transaction.merchant_name),
@@ -160,8 +160,8 @@ class DollarbyApp(App[None]):
         summary = self.query_one("#summary", Static)
         summary.update(
             f"{len(selected):,} shown · "
-            f"{self.statement.uncategorised_count:,} uncategorised · "
-            f"{self.statement.categorised_count:,} categorised · "
+            f"{self.statement.unprocessed_count:,} unprocessed · "
+            f"{self.statement.processed_count:,} processed · "
             f"{len(self.statement.transactions):,} total",
         )
 
@@ -171,9 +171,9 @@ def run_tui(statement: Statement) -> None:
     DollarbyApp(statement).run()
 
 
-def _status(*, categorised: bool) -> Text:
-    """Render a transaction's categorisation status."""
-    if categorised:
+def _status(*, processed: bool) -> Text:
+    """Render whether a transaction has at least one tag."""
+    if processed:
         return Text("✓", style="green")
     return Text("!", style="yellow")
 

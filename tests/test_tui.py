@@ -12,24 +12,38 @@ pytestmark = pytest.mark.asyncio
 
 
 async def test_transaction_view_selector_filters_rows(
-    categorised_statement: Statement,
+    partly_processed_statement: Statement,
 ) -> None:
-    """Switch among uncategorised, categorised, and all transactions."""
-    app = DollarbyApp(categorised_statement)
+    """Default to all transactions and switch between processing states."""
+    app = DollarbyApp(partly_processed_statement)
 
     async with app.run_test() as pilot:
         table = app.query_one("#transactions", TransactionTable)
         selector = app.query_one("#transaction-view", Select)
 
-        assert table.row_count == 1
+        assert selector.value is TransactionView.ALL
+        assert table.row_count == len(partly_processed_statement.transactions)
 
-        selector.value = TransactionView.CATEGORISED
+        selector.value = TransactionView.UNPROCESSED
         await pilot.pause()
         assert table.row_count == 1
 
-        selector.value = TransactionView.ALL
+        selector.value = TransactionView.PROCESSED
         await pilot.pause()
-        assert table.row_count == len(categorised_statement.transactions)
+        assert table.row_count == 1
+
+
+async def test_processed_row_displays_its_processor_tags(
+    partly_processed_statement: Statement,
+) -> None:
+    """Show processor-derived tags alongside a transaction in the default view."""
+    app = DollarbyApp(partly_processed_statement)
+
+    async with app.run_test():
+        table = app.query_one("#transactions", TransactionTable)
+
+        row = table.get_row_at(0)
+        assert row[6] == "food, restaurant"
 
 
 async def test_j_and_k_move_the_transaction_cursor(large_statement: Statement) -> None:
