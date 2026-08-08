@@ -8,11 +8,13 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = [
+    "click>=8.4.2",
     "pandas>=3.0.5",
+    "textual>=8.2.8",
 ]
 
 [project.scripts]
-dollarby = "dollarby:main"
+dollarby = "dollarby.cli:cli"
 
 [build-system]
 requires = ["uv_build>=0.12.1,<0.13.0"]
@@ -22,8 +24,17 @@ build-backend = "uv_build"
 dev = [
     "pandas-stubs>=3.0.5.260730",
     "pre-commit>=4.6.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.2",
     "ty>=0.0.68",
 ]
+
+### Pytest
+[tool.pytest.ini_options]
+addopts = ["-ra", "--strict-config", "--strict-markers"]
+asyncio_mode = "strict"
+testpaths = ["tests"]
 
 ### Ty
 [tool.ty.rules]
@@ -50,8 +61,9 @@ select = [
   "ALL", # Enable all linting rules.
 ]
 ignore = [
-  "D203",   # One blank line required before class docstring
-  "EM101",  # Allow string literals in Exception("Messages")
+  "D203",     # One blank line required before class docstring
+  "EM101",    # Allow string literals in Exception("Messages")
+  "CPY001",   # Don't enforce copyright notices at the top of files
 ]
 fixable = [
   "ALL", # All fixable rules will be automatically corrected.

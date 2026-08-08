@@ -1,7 +1,7 @@
 #!/usr/bin/env -S just --justfile
 
-set dotenv-load := true
-set positional-arguments := true
+set dotenv-load
+set positional-arguments
 
 # Constants/Preferences
 
@@ -24,14 +24,12 @@ _default:
     @echo ""
     @just --list
 
-
 ### Python
 
 # Run a Python command
 [group('python')]
 py *args='':
     uv run {{ uv_sync }} $UV_FLAGS python {{ args }}
-
 
 ### Environment
 
@@ -60,21 +58,20 @@ init:
 update:
     just update-python
 
-
 ### Linting
 
 # Run Ruff linting and fix any auto-fixable issues
-[group('lint')]
+[group('development')]
 lint-python:
-    @ruff check . --fix
+    ruff check . --fix
 
 # Format the Justfile (Note: Marked as 'Unstable!')
-[group('lint')]
+[group('development')]
 lint-just:
-    @just --fmt --unstable
+    just --fmt --unstable
 
 # Run all linting commands across the project
-[group('lint')]
+[group('development')]
 lint:
     just lint-python
     just lint-just
@@ -82,4 +79,12 @@ lint:
 
 ### Workflow
 
-# TODO: commands for report generation# TODO: commands for report generation
+# Run the project's PyTest suite
+[group('development')]
+test:
+  uv run pytest
+
+# Run pre-commit checks (and fixes) across the whole project
+[group('development')]
+check:
+  uv run pre-commit run --all-files

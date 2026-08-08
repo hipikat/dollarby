@@ -1,2 +1,1 @@
-def main() -> None:
-    print("Hello from dollarby!")
+"""Top-level package for dollarby."""
