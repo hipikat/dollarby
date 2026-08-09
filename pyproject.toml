@@ -35,7 +35,7 @@ dev = [
 
 ### Pytest
 [tool.pytest.ini_options]
-addopts = ["-ra", "--strict-config", "--strict-markers"]
+addopts = ["-q", "--strict-config", "--strict-markers"]
 asyncio_mode = "strict"
 testpaths = ["tests"]
 
@@ -67,6 +67,7 @@ ignore = [
   "D203",     # One blank line required before class docstring
   "EM101",    # Allow string literals in Exception("Messages")
   "CPY001",   # Don't enforce copyright notices at the top of files
+  "COM812",   # Don't enforce trailing commas
 ]
 fixable = [
   "ALL", # All fixable rules will be automatically corrected.

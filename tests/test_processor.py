@@ -6,7 +6,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from dollarby.processor import DEFAULT_PROCESSOR_PATH, ProcessorError, load_processor
+from dollarby.processor import (
+    DEFAULT_PROCESSOR_PATH,
+    PROCESSOR_SCHEMA_VERSION,
+    ProcessorError,
+    load_processor,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -16,6 +21,7 @@ def test_nab_processor_defines_export_and_match_order() -> None:
     """Load the initial NAB export contract from YAML."""
     processor = load_processor(DEFAULT_PROCESSOR_PATH)
 
+    assert processor.schema_version == PROCESSOR_SCHEMA_VERSION
     assert processor.source_column("date") == "Date"
     assert processor.statement.dates.format == "%d %b %y"
     assert tuple(rule.column for rule in processor.tagging.rules) == (
@@ -25,7 +31,14 @@ def test_nab_processor_defines_export_and_match_order() -> None:
     restaurant_rule = processor.tagging.rules[0].matches[0]
     assert restaurant_rule.tags == ("food", "restaurant")
     assert restaurant_rule.final is True
-    assert processor.tagging.rules[0].matches[1].final is False
+    assert all(
+        rule.final for column_rules in processor.tagging.rules for rule in column_rules.matches
+    )
+    assert tuple(rule.tags for rule in processor.tagging.rules[1].matches) == (
+        ("personal",),
+        ("transport",),
+        ("rent",),
+    )
 
 
 def test_processor_rejects_invalid_regex(tmp_path: Path) -> None:

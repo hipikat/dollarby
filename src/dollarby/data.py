@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import pandas as pd
 
@@ -56,6 +56,13 @@ class Statement:
         """Return the number of transactions which still need a tag."""
         return len(self.transactions) - self.processed_count
 
+    @property
+    def tags(self) -> tuple[str, ...]:
+        """Return every transaction tag in case-insensitive alphabetical order."""
+        tag_sets = cast("list[frozenset[str]]", self.transactions["tags"].tolist())
+        tags = {tag for transaction_tags in tag_sets for tag in transaction_tags}
+        return tuple(sorted(tags, key=lambda tag: (tag.casefold(), tag)))
+
     def select(self, view: TransactionView) -> pd.DataFrame:
         """Select transactions for a processing-state view."""
         if view is TransactionView.ALL:
@@ -64,6 +71,13 @@ class Statement:
         mask = self.processed_mask
         if view is TransactionView.UNPROCESSED:
             mask = ~mask
+        return self.transactions.loc[mask]
+
+    def select_tag(self, tag: str) -> pd.DataFrame:
+        """Select transactions carrying one tag."""
+        mask = self.transactions["tags"].map(
+            lambda transaction_tags: tag in cast("frozenset[str]", transaction_tags),
+        )
         return self.transactions.loc[mask]
 
 

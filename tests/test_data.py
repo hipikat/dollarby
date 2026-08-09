@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from dollarby.data import Statement, StatementError, TransactionView, load_statement
+from dollarby.processor import ColumnRules, TagRule
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -43,7 +44,6 @@ def test_statement_rejects_unexpected_date_format(
     ("placeholder", "value", "expected_tag"),
     [
         ("Example Merchant 1", "VODAFONE AU", "phone & internet"),
-        ("Example purchase 1", "Starlink Internet", "phone & internet"),
         ("Example Merchant 1", "Spintel Pty Ltd", "phone & internet"),
         ("Example Merchant 1", "Liquor Barons Northbridge", "alcohol"),
         ("Example Merchant 1", "Liquorland 1234", "alcohol"),
@@ -67,13 +67,43 @@ def test_statement_tags_matching_words_in_the_configured_field(
     assert expected_tag in tags
 
 
+@pytest.mark.parametrize(
+    ("rule_index", "expected_tag"),
+    [
+        (0, "personal"),
+        (1, "transport"),
+        (2, "rent"),
+    ],
+)
+def test_statement_tags_transaction_details_rules(
+    statement_path: Path,
+    processor: StatementProcessor,
+    rule_index: int,
+    expected_tag: str,
+) -> None:
+    """Apply each local details rule case-insensitively without copying its private match text."""
+    rule = processor.tagging.rules[1].matches[rule_index]
+    match_text = _literal_match(rule.regex).swapcase()
+    source = statement_path.read_text(encoding="utf-8")
+    statement_path.write_text(
+        source.replace("Example purchase 1", f"Payment {match_text} reference", 1),
+        encoding="utf-8",
+    )
+
+    statement = load_statement(statement_path, processor)
+    tags = cast("frozenset[str]", statement.transactions.loc[0, "tags"])
+
+    assert expected_tag in tags
+
+
 def test_statement_does_not_apply_rules_to_the_other_field(
     statement_path: Path,
     processor: StatementProcessor,
 ) -> None:
     """Avoid evaluating each expression against both transaction fields."""
+    details_match = _literal_match(processor.tagging.rules[1].matches[0].regex)
     source = statement_path.read_text(encoding="utf-8")
-    source = source.replace("Example Merchant 1", "Starlink Internet", 1)
+    source = source.replace("Example Merchant 1", details_match, 1)
     source = source.replace("Example purchase 1", "Vodafone AU", 1)
     statement_path.write_text(source, encoding="utf-8")
 
@@ -108,11 +138,13 @@ def test_final_rule_stops_later_tag_processing(
     processor: StatementProcessor,
 ) -> None:
     """Stop processing a row after a final rule while respecting word boundaries."""
+    details_match = _literal_match(processor.tagging.rules[1].matches[0].regex)
+    near_match = _literal_match(processor.tagging.rules[1].matches[1].regex)
     source = statement_path.read_text(encoding="utf-8")
     source = source.replace("Example Merchant 1", "Grill'd Liquorland", 1)
-    source = source.replace("Example purchase 1", "Starlink Internet", 1)
+    source = source.replace("Example purchase 1", details_match, 1)
     source = source.replace("Example Merchant 2", "Vodafonex BWS2", 1)
-    source = source.replace("Example purchase 2", "notstarlink", 1)
+    source = source.replace("Example purchase 2", f"not{near_match}", 1)
     statement_path.write_text(source, encoding="utf-8")
 
     statement = load_statement(statement_path, processor)
@@ -121,6 +153,29 @@ def test_final_rule_stops_later_tag_processing(
 
     assert first_tags == frozenset({"food", "restaurant"})
     assert second_tags == frozenset()
+
+
+def test_explicit_non_final_rule_allows_later_tags(
+    statement_path: Path,
+    processor: StatementProcessor,
+) -> None:
+    """Continue processing after an annotation-only rule explicitly opts out of finality."""
+    rules = (
+        ColumnRules(
+            column="merchant_name",
+            matches=(
+                TagRule(regex=r"\bExample\b", tags=("deductible",), final=False),
+                TagRule(regex=r"\bMerchant\b", tags=("merchant",)),
+            ),
+        ),
+    )
+    tagging = processor.tagging.model_copy(update={"rules": rules})
+    non_final_processor = processor.model_copy(update={"tagging": tagging})
+
+    statement = load_statement(statement_path, non_final_processor)
+    tags = cast("frozenset[str]", statement.transactions.loc[0, "tags"])
+
+    assert tags == frozenset({"deductible", "merchant"})
 
 
 def test_miscellaneous_tag_counts_as_processed(statement: Statement) -> None:
@@ -136,6 +191,21 @@ def test_miscellaneous_tag_counts_as_processed(statement: Statement) -> None:
     assert len(tagged_statement.select(TransactionView.UNPROCESSED)) == 1
 
 
+def test_statement_lists_and_selects_tags(statement: Statement) -> None:
+    """List tags alphabetically and select the rows carrying one tag."""
+    transactions = statement.transactions.assign(
+        tags=pd.Series(
+            [frozenset({"zebra", "Alpha"}), frozenset({"beta"})],
+            index=statement.transactions.index,
+            dtype="object",
+        ),
+    )
+    tagged_statement = Statement(path=statement.path, transactions=transactions)
+
+    assert tagged_statement.tags == ("Alpha", "beta", "zebra")
+    assert list(tagged_statement.select_tag("beta")["source_row"]) == [3]
+
+
 @pytest.mark.parametrize(
     "view",
     list(TransactionView),
@@ -149,3 +219,8 @@ def test_statement_selects_processing_views(
         len(partly_processed_statement.transactions) if view is TransactionView.ALL else 1
     )
     assert len(partly_processed_statement.select(view)) == expected_count
+
+
+def _literal_match(expression: str) -> str:
+    """Extract a private literal from a simple word-bounded processor expression."""
+    return expression.removeprefix(r"\b").removesuffix(r"\b")

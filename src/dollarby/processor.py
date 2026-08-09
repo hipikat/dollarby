@@ -27,6 +27,7 @@ from pydantic_settings import (
 )
 
 DEFAULT_PROCESSOR_PATH: Final = Path(__file__).parents[2] / "processors" / "nab-2026.yaml"
+PROCESSOR_SCHEMA_VERSION: Final = 2
 CANONICAL_COLUMNS: Final = frozenset(
     {
         "date",
@@ -78,7 +79,7 @@ class TagRule(ProcessorModel):
 
     regex: StrictStr = Field(min_length=1)
     tags: NonEmptyStrings
-    final: StrictBool = False
+    final: StrictBool = True
 
     @field_validator("regex")
     @classmethod
@@ -116,7 +117,10 @@ class StatementProcessor(BaseSettings):
 
     model_config = SettingsConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Annotated[int, Field(strict=True, ge=1, le=1)]
+    schema_version: Annotated[
+        int,
+        Field(strict=True, ge=PROCESSOR_SCHEMA_VERSION, le=PROCESSOR_SCHEMA_VERSION),
+    ]
     name: NonEmptyString
     statement: StatementSettings
     tagging: TaggingSettings

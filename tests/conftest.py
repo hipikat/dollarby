@@ -71,6 +71,19 @@ def partly_processed_statement(
 
 
 @pytest.fixture
+def multi_tagged_statement(
+    statement_path: Path,
+    processor: StatementProcessor,
+) -> Statement:
+    """Return transactions carrying three tags across two merchants."""
+    source = statement_path.read_text(encoding="utf-8")
+    source = source.replace("Example Merchant 1", "Grill'd", 1)
+    source = source.replace("Example Merchant 2", "Vodafone", 1)
+    statement_path.write_text(source, encoding="utf-8")
+    return load_statement(statement_path, processor)
+
+
+@pytest.fixture
 def large_statement(tmp_path: Path, processor: StatementProcessor) -> Statement:
     """Return enough transactions to exercise page-based TUI movement."""
     path = _write_statement(
