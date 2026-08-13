@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import pytest
-from textual.widgets import Select, Static, TabbedContent
+from textual.containers import Vertical
+from textual.widgets import Input, RadioButton, Select, Static, TabbedContent
 
-from dollarby.data import Statement, TransactionView
-from dollarby.tui import DollarbyApp, TagList, TransactionTable
+from dollarby.data import Statement, TagFilterField, TransactionView
+from dollarby.tui import AddTagFilterDialog, DollarbyApp, TagList, TransactionTable
 
 pytestmark = pytest.mark.asyncio
 
@@ -95,6 +96,107 @@ async def test_tag_list_filters_transactions(
         assert table.row_count == 1
         assert table.get_row_at(0)[3] == "Vodafone"
         assert str(total.content) == "Total: $-2.00"
+
+
+async def test_add_filter_dialog_is_prefilled_from_selected_transaction(
+    statement: Statement,
+) -> None:
+    """Open the modal with editable merchant and details text from the selected row."""
+    app = DollarbyApp(statement)
+
+    async with app.run_test() as pilot:
+        await pilot.press("j", "a")
+
+        dialog = app.screen
+        assert isinstance(dialog, AddTagFilterDialog)
+        panel = dialog.query_one("#tag-filter-dialog", Vertical)
+        merchant_radio = dialog.query_one("#filter-merchant", RadioButton)
+        details_radio = dialog.query_one("#filter-details", RadioButton)
+        merchant_input = dialog.query_one("#merchant-match", Input)
+        details_input = dialog.query_one("#details-match", Input)
+
+        assert panel.region.width >= app.size.width * 4 // 5
+        assert panel.region.x == (app.size.width - panel.region.width) // 2
+        assert merchant_radio.region.y == merchant_input.region.y
+        assert details_radio.region.y == details_input.region.y
+        assert merchant_input.value == "Example Merchant 2"
+        assert details_input.value == "Example purchase 2"
+        assert merchant_input.has_focus
+
+        merchant_input.value = "Edited Merchant"
+        await pilot.press("escape")
+
+        assert not isinstance(app.screen, AddTagFilterDialog)
+        assert statement.tag_filters == []
+
+
+async def test_add_filter_dialog_is_prefilled_from_tags_view(
+    multi_tagged_statement: Statement,
+) -> None:
+    """Use the selected transaction from the active Tags tab when opening the modal."""
+    app = DollarbyApp(multi_tagged_statement)
+
+    async with app.run_test() as pilot:
+        await pilot.press("2", "a")
+
+        dialog = app.screen
+        assert isinstance(dialog, AddTagFilterDialog)
+        assert dialog.query_one("#merchant-match", Input).value == "Grill'd"
+
+        await pilot.press("escape")
+
+
+async def test_filter_dialog_saves_merchant_filter_and_refreshes_views(
+    statement: Statement,
+) -> None:
+    """Apply comma-separated tags to all matching merchants and expose the new tags."""
+    app = DollarbyApp(statement)
+
+    async with app.run_test() as pilot:
+        await pilot.press("a")
+        dialog = app.screen
+        assert isinstance(dialog, AddTagFilterDialog)
+        dialog.query_one("#merchant-match", Input).value = "example merchant"
+        dialog.query_one("#filter-tags", Input).value = "Work, recurring, work"
+
+        await pilot.click("#save-filter")
+        await pilot.pause()
+
+        assert not isinstance(app.screen, AddTagFilterDialog)
+        assert statement.tag_filters[0].field is TagFilterField.MERCHANT
+        assert statement.tags == ("recurring", "Work")
+        assert all(
+            tags == frozenset({"Work", "recurring"}) for tags in statement.transactions["tags"]
+        )
+        assert app.query_one("#tag-list", TagList).active_tag == "Work"
+        statement_row = app.query_one("#transactions", TransactionTable).get_row_at(0)
+        assert statement_row[6] == "Work, recurring"
+
+
+async def test_filter_dialog_applies_selected_details_field(statement: Statement) -> None:
+    """Use the selected radio field and show validation errors without closing the modal."""
+    app = DollarbyApp(statement)
+
+    async with app.run_test() as pilot:
+        await pilot.press("a")
+        dialog = app.screen
+        assert isinstance(dialog, AddTagFilterDialog)
+        dialog.query_one("#filter-details", RadioButton).value = True
+        dialog.query_one("#details-match", Input).value = "PURCHASE 2"
+
+        await pilot.click("#save-filter")
+        assert isinstance(app.screen, AddTagFilterDialog)
+        assert str(dialog.query_one("#filter-error", Static).content) == "Enter at least one tag"
+
+        dialog.query_one("#filter-tags", Input).value = "Personal"
+        dialog.action_save()
+        await pilot.pause()
+
+        assert statement.tag_filters[0].field is TagFilterField.DETAILS
+        assert list(statement.transactions["tags"]) == [
+            frozenset(),
+            frozenset({"Personal"}),
+        ]
 
 
 async def test_j_and_k_move_the_transaction_cursor(large_statement: Statement) -> None:

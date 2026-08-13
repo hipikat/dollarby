@@ -9,20 +9,25 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.screen import ModalScreen
 from textual.widgets import (
+    Button,
     DataTable,
     Footer,
     Header,
+    Input,
     Label,
     ListItem,
     ListView,
+    RadioButton,
+    RadioSet,
     Select,
     Static,
     TabbedContent,
     TabPane,
 )
 
-from dollarby.data import Statement, TransactionView
+from dollarby.data import Statement, TagFilter, TagFilterError, TagFilterField, TransactionView
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -104,6 +109,185 @@ class TagList(ListView):
             return None
         return self.tags[self.index]
 
+    async def replace_tags(self, tags: tuple[str, ...], *, active_tag: str) -> None:
+        """Replace the available tags and highlight one requested tag."""
+        self.index = None
+        await self.clear()
+        self.tags = tags
+        await self.extend(ListItem(Label(tag)) for tag in tags)
+        self.index = tags.index(active_tag) if active_tag in tags else 0 if tags else None
+
+
+class AddTagFilterDialog(ModalScreen[TagFilter | None]):
+    """Collect one field-specific tag filter without leaving the current view."""
+
+    CSS = """
+    AddTagFilterDialog {
+        align: center middle;
+    }
+
+    #tag-filter-dialog {
+        width: 80%;
+        min-width: 60;
+        max-width: 100;
+        height: 22;
+        padding: 1 2;
+        border: thick $accent;
+        background: $surface;
+    }
+
+    #filter-title {
+        height: 1;
+        text-style: bold;
+        content-align: center middle;
+    }
+
+    #filter-help {
+        height: 2;
+        color: $text-muted;
+        content-align: center middle;
+    }
+
+    #match-fields {
+        height: 6;
+        margin-top: 1;
+    }
+
+    #filter-field {
+        width: 18;
+        height: 6;
+        border: none;
+        padding: 0;
+        background: $surface;
+    }
+
+    #filter-field RadioButton {
+        width: 100%;
+        height: 3;
+    }
+
+    #filter-matches {
+        width: 1fr;
+        height: 6;
+    }
+
+    #tags-row {
+        height: 3;
+        margin-top: 1;
+    }
+
+    #tags-label {
+        width: 18;
+        padding: 0 1;
+        content-align: left middle;
+    }
+
+    #filter-tags {
+        width: 1fr;
+    }
+
+    #filter-error {
+        height: 1;
+        color: $error;
+    }
+
+    #filter-buttons {
+        height: 3;
+        align: right middle;
+    }
+
+    #filter-buttons Button {
+        width: 16;
+        margin-left: 1;
+    }
+    """
+    BINDINGS: ClassVar[list[Binding]] = [
+        Binding("escape", "cancel", "Cancel", show=False, priority=True),
+        Binding("ctrl+s", "save", "Save", show=False, priority=True),
+    ]
+
+    def __init__(self, *, merchant: str = "", details: str = "") -> None:
+        """Create a dialog pre-filled from an optional selected transaction."""
+        super().__init__()
+        self.merchant = merchant
+        self.details = details
+
+    @override
+    def compose(self) -> ComposeResult:
+        """Compose the field, match-text, tag, and action controls."""
+        with Vertical(id="tag-filter-dialog"):
+            yield Label("Add Tag Filter", id="filter-title")
+            yield Static(
+                "Literal matching is case-insensitive. Filters apply to this session only.",
+                id="filter-help",
+            )
+            with Horizontal(id="match-fields"):
+                with RadioSet(id="filter-field"):
+                    yield RadioButton("Merchant", value=True, id="filter-merchant")
+                    yield RadioButton("Details", id="filter-details")
+                with Vertical(id="filter-matches"):
+                    yield Input(
+                        self.merchant,
+                        placeholder="Merchant text",
+                        id="merchant-match",
+                    )
+                    yield Input(
+                        self.details,
+                        placeholder="Transaction details text",
+                        id="details-match",
+                    )
+            with Horizontal(id="tags-row"):
+                yield Label("Tags", id="tags-label")
+                yield Input(
+                    placeholder="Comma-separated tags",
+                    id="filter-tags",
+                )
+            yield Static(id="filter-error")
+            with Horizontal(id="filter-buttons"):
+                yield Button("Cancel", id="cancel-filter")
+                yield Button("Save", variant="primary", id="save-filter")
+
+    def on_mount(self) -> None:
+        """Put the cursor in the selected field's editable match text."""
+        self.query_one("#merchant-match", Input).focus()
+
+    @on(Button.Pressed)
+    def press_button(self, event: Button.Pressed) -> None:
+        """Save or cancel from the dialog buttons."""
+        if event.button.id == "save-filter":
+            self.action_save()
+        else:
+            self.action_cancel()
+
+    @on(Input.Submitted, "#filter-tags")
+    def submit_tags(self) -> None:
+        """Save when Enter is pressed in the final text field."""
+        self.action_save()
+
+    def action_save(self) -> None:
+        """Validate the controls and return a tag filter to the application."""
+        field_set = self.query_one("#filter-field", RadioSet)
+        pressed = field_set.pressed_button
+        field = (
+            TagFilterField.DETAILS
+            if pressed is not None and pressed.id == "filter-details"
+            else TagFilterField.MERCHANT
+        )
+        match_selector = "#details-match" if field is TagFilterField.DETAILS else "#merchant-match"
+        match = self.query_one(match_selector, Input).value
+        raw_tags = self.query_one("#filter-tags", Input).value
+
+        try:
+            tag_filter = TagFilter(field=field, match=match, tags=tuple(raw_tags.split(",")))
+        except TagFilterError as error:
+            self.query_one("#filter-error", Static).update(str(error))
+            return
+        self.dismiss(tag_filter)
+
+    def action_cancel(self) -> None:
+        """Close the dialog without creating a filter."""
+        self.dismiss(None)
+
 
 class DollarbyApp(App[None]):
     """Browse and, eventually, categorise transactions in one statement."""
@@ -165,6 +349,7 @@ class DollarbyApp(App[None]):
     BINDINGS: ClassVar[list[Binding]] = [
         Binding("1", "show_statements", "Statements", priority=True),
         Binding("2", "show_tags", "Tags", priority=True),
+        Binding("a", "add_tag_filter", "Add tag filter"),
         Binding("q", "quit", "Quit"),
         Binding("escape", "quit", "Quit", show=False),
     ]
@@ -249,6 +434,45 @@ class DollarbyApp(App[None]):
     def action_show_tags(self) -> None:
         """Activate the Tags tab."""
         self.query_one("#views", TabbedContent).active = "tags"
+
+    def action_add_tag_filter(self) -> None:
+        """Open a tag-filter dialog pre-filled from the active transaction table."""
+        merchant, details = self._selected_transaction_text()
+        self.push_screen(
+            AddTagFilterDialog(merchant=merchant, details=details),
+            self._apply_tag_filter,
+        )
+
+    async def _apply_tag_filter(self, tag_filter: TagFilter | None) -> None:
+        """Apply a saved filter and refresh both transaction views."""
+        if tag_filter is None:
+            return
+
+        match_count = self.statement.apply_tag_filter(tag_filter)
+        selected_view = self.query_one("#transaction-view", Select).value
+        view = selected_view if isinstance(selected_view, TransactionView) else TransactionView.ALL
+        self._show_transactions(view)
+
+        tag_list = self.query_one("#tag-list", TagList)
+        self._tables_ready = False
+        await tag_list.replace_tags(self.statement.tags, active_tag=tag_filter.tags[0])
+        self._tables_ready = True
+        self._show_tag_transactions(tag_list.active_tag)
+
+        if self.query_one("#views", TabbedContent).active == "tags":
+            tag_list.focus()
+        self.notify(f"Applied {', '.join(tag_filter.tags)} to {match_count:,} transaction(s)")
+
+    def _selected_transaction_text(self) -> tuple[str, str]:
+        """Return merchant and details from the active view's selected transaction."""
+        tab = self.query_one("#views", TabbedContent).active
+        selector = "#tag-transactions" if tab == "tags" else "#transactions"
+        table = self.query_one(selector, TransactionTable)
+        if not table.row_count or table.cursor_row >= table.row_count:
+            return "", ""
+
+        row = table.get_row_at(table.cursor_row)
+        return str(row[3]), str(row[4])
 
     def _show_transactions(self, view: TransactionView) -> None:
         """Populate the table with transactions from one view."""

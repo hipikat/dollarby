@@ -7,7 +7,14 @@ from typing import TYPE_CHECKING, cast
 import pandas as pd
 import pytest
 
-from dollarby.data import Statement, StatementError, TransactionView, load_statement
+from dollarby.data import (
+    Statement,
+    StatementError,
+    TagFilter,
+    TagFilterField,
+    TransactionView,
+    load_statement,
+)
 from dollarby.processor import ColumnRules, TagRule
 
 if TYPE_CHECKING:
@@ -204,6 +211,43 @@ def test_statement_lists_and_selects_tags(statement: Statement) -> None:
 
     assert tagged_statement.tags == ("Alpha", "beta", "zebra")
     assert list(tagged_statement.select_tag("beta")["source_row"]) == [3]
+
+
+def test_statement_applies_case_insensitive_literal_tag_filter(statement: Statement) -> None:
+    """Add normalised tags to every literal field match and remember the session filter."""
+    tag_filter = TagFilter(
+        field=TagFilterField.MERCHANT,
+        match="  example merchant  ",
+        tags=("Work", " recurring ", "work", ""),
+    )
+
+    match_count = statement.apply_tag_filter(tag_filter)
+
+    assert match_count == len(statement.transactions)
+    assert tag_filter.match == "example merchant"
+    assert tag_filter.tags == ("Work", "recurring")
+    assert statement.tag_filters == [tag_filter]
+    assert list(statement.transactions["tags"]) == [
+        frozenset({"Work", "recurring"}),
+        frozenset({"Work", "recurring"}),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("match", "tags", "message"),
+    [
+        (" ", ("personal",), "Enter text to match"),
+        ("Example", (" ", ""), "Enter at least one tag"),
+    ],
+)
+def test_tag_filter_rejects_incomplete_values(
+    match: str,
+    tags: tuple[str, ...],
+    message: str,
+) -> None:
+    """Reject filters without usable match text or tags."""
+    with pytest.raises(ValueError, match=message):
+        TagFilter(field=TagFilterField.DETAILS, match=match, tags=tags)
 
 
 @pytest.mark.parametrize(
