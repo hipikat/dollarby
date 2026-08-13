@@ -1,10 +1,14 @@
-"""Load declarative statement processors from YAML."""
+"""Load, validate, and persist declarative statement processors."""
 
 from __future__ import annotations
 
+import os
 import re
+import tempfile
+from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Final, Self, override
+from typing import Annotated, Final, Self
 
 import yaml
 from pydantic import (
@@ -18,16 +22,11 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from pydantic_settings import (
-    BaseSettings,
-    PydanticBaseSettingsSource,
-    SettingsConfigDict,
-    SettingsError,
-    YamlConfigSettingsSource,
-)
 
 DEFAULT_PROCESSOR_PATH: Final = Path(__file__).parents[2] / "processors" / "nab-2026.yaml"
-PROCESSOR_SCHEMA_VERSION: Final = 2
+PROCESSOR_SCHEMA_VERSION: Final = 3
+MISSING_MATCH_MESSAGE: Final = "Enter text to match"
+MISSING_TAGS_MESSAGE: Final = "Enter at least one tag"
 CANONICAL_COLUMNS: Final = frozenset(
     {
         "date",
@@ -74,28 +73,69 @@ class StatementSettings(ProcessorModel):
     dates: DateSettings
 
 
-class TagRule(ProcessorModel):
-    """Add tags when a transaction value matches a regular expression."""
+class TagRuleField(StrEnum):
+    """Choose a text field supported by the interactive Add Tag action."""
 
-    regex: StrictStr = Field(min_length=1)
+    MERCHANT = "merchant_name"
+    DETAILS = "transaction_details"
+
+
+class TagRule(ProcessorModel):
+    """Add tags when a transaction value contains one of the configured literals."""
+
+    contains: NonEmptyString | NonEmptyStrings
     tags: NonEmptyStrings
     final: StrictBool = True
 
-    @field_validator("regex")
-    @classmethod
-    def validate_regex(cls, expression: str) -> str:
-        """Reject malformed regular expressions while loading the processor."""
-        try:
-            re.compile(expression)
-        except re.error as error:
-            message = f"invalid regex: {error}"
-            raise ValueError(message) from error
-        return expression
+    @property
+    def literals(self) -> tuple[str, ...]:
+        """Return the configured scalar or sequence in one iterable form."""
+        if isinstance(self.contains, str):
+            return (self.contains,)
+        return self.contains
 
     def compile(self, *, case_sensitive: bool) -> re.Pattern[str]:
-        """Compile this rule with the processor's case-sensitivity setting."""
+        """Compile escaped literals with whole-value word-edge matching."""
         flags = re.NOFLAG if case_sensitive else re.IGNORECASE
-        return re.compile(self.regex, flags)
+        alternatives = "|".join(re.escape(literal) for literal in self.literals)
+        return re.compile(rf"(?<!\w)(?:{alternatives})(?!\w)", flags)
+
+
+class NewTagRule(ProcessorModel):
+    """Represent one normalised rule entered through the Add Tag dialog."""
+
+    field: TagRuleField
+    contains: StrictStr
+    tags: tuple[StrictStr, ...]
+
+    @field_validator("contains")
+    @classmethod
+    def normalise_contains(cls, value: str) -> str:
+        """Require usable literal match text."""
+        value = value.strip()
+        if not value:
+            raise ValueError(MISSING_MATCH_MESSAGE)
+        return value
+
+    @field_validator("tags")
+    @classmethod
+    def normalise_tags(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        """Strip and case-insensitively deduplicate entered tags."""
+        tags: list[str] = []
+        seen: set[str] = set()
+        for raw_tag in values:
+            tag = raw_tag.strip()
+            identity = tag.casefold()
+            if tag and identity not in seen:
+                seen.add(identity)
+                tags.append(tag)
+        if not tags:
+            raise ValueError(MISSING_TAGS_MESSAGE)
+        return tuple(tags)
+
+    def as_tag_rule(self) -> TagRule:
+        """Build the persisted processor rule represented by this input."""
+        return TagRule(contains=self.contains, tags=self.tags)
 
 
 class ColumnRules(ProcessorModel):
@@ -112,10 +152,8 @@ class TaggingSettings(ProcessorModel):
     rules: tuple[ColumnRules, ...]
 
 
-class StatementProcessor(BaseSettings):
+class StatementProcessor(ProcessorModel):
     """Describe one statement export and its automatic tagging rules."""
-
-    model_config = SettingsConfigDict(extra="forbid", frozen=True)
 
     schema_version: Annotated[
         int,
@@ -124,20 +162,6 @@ class StatementProcessor(BaseSettings):
     name: NonEmptyString
     statement: StatementSettings
     tagging: TaggingSettings
-
-    @classmethod
-    @override
-    def settings_customise_sources(
-        cls,
-        settings_cls: type[BaseSettings],
-        init_settings: PydanticBaseSettingsSource,
-        env_settings: PydanticBaseSettingsSource,
-        dotenv_settings: PydanticBaseSettingsSource,
-        file_secret_settings: PydanticBaseSettingsSource,
-    ) -> tuple[PydanticBaseSettingsSource, ...]:
-        """Treat the selected processor file as the complete configuration."""
-        del cls, settings_cls, env_settings, dotenv_settings, file_secret_settings
-        return (init_settings,)
 
     @model_validator(mode="after")
     def validate_canonical_columns(self) -> Self:
@@ -177,15 +201,93 @@ class StatementProcessor(BaseSettings):
         message = f"Processor does not map canonical column {canonical_column!r}"
         raise ProcessorError(message)
 
+    def with_tag_rule(self, new_rule: NewTagRule) -> Self:
+        """Return a validated processor with one interactive rule added or merged."""
+        replacement = new_rule.as_tag_rule()
+        updated_groups: list[ColumnRules] = []
+        found_column = False
+
+        for column_rules in self.tagging.rules:
+            if column_rules.column != new_rule.field.value:
+                updated_groups.append(column_rules)
+                continue
+
+            found_column = True
+            updated_groups.append(_upsert_tag_rule(column_rules, replacement))
+
+        if not found_column:
+            updated_groups.append(
+                ColumnRules(column=new_rule.field.value, matches=(replacement,)),
+            )
+
+        tagging = TaggingSettings(
+            case_sensitive=self.tagging.case_sensitive,
+            rules=tuple(updated_groups),
+        )
+        return type(self)(
+            schema_version=self.schema_version,
+            name=self.name,
+            statement=self.statement,
+            tagging=tagging,
+        )
+
+
+@dataclass(slots=True)
+class ProcessorDocument:
+    """Coordinate one validated processor with its writable YAML document."""
+
+    path: Path
+    processor: StatementProcessor
+    _source_text: str = field(repr=False)
+
+    @classmethod
+    def load(cls, path: Path) -> Self:
+        """Load a processor while retaining the exact source used for conflict checks."""
+        processor, source_text = _read_processor(path)
+        return cls(path=path, processor=processor, _source_text=source_text)
+
+    def add_tag_rule(self, new_rule: NewTagRule) -> StatementProcessor:
+        """Persist one rule and return the processor now represented on disk."""
+        updated = self.processor.with_tag_rule(new_rule)
+        if updated == self.processor:
+            return self.processor
+        self.save(updated)
+        return updated
+
+    def save(self, processor: StatementProcessor) -> None:
+        """Atomically replace an unchanged source document with a validated model."""
+        try:
+            current_source = self.path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            message = f"Could not read processor before saving {self.path}: {error}"
+            raise ProcessorError(message) from error
+
+        if current_source != self._source_text:
+            message = (
+                f"Processor {self.path} changed after Dollarby loaded it; reload before saving"
+            )
+            raise ProcessorError(message)
+
+        source_text = _dump_processor(processor)
+        _atomic_write(self.path, source_text)
+        self.processor = processor
+        self._source_text = source_text
+
 
 def load_processor(path: Path) -> StatementProcessor:
     """Load and validate a YAML statement processor."""
+    processor, _source_text = _read_processor(path)
+    return processor
+
+
+def _read_processor(path: Path) -> tuple[StatementProcessor, str]:
+    """Read and validate a processor while preserving its source text."""
     try:
-        source = YamlConfigSettingsSource(StatementProcessor, yaml_file=path)
-        return StatementProcessor.model_validate(source())
+        source_text = path.read_text(encoding="utf-8")
+        source = yaml.safe_load(source_text)
+        return StatementProcessor.model_validate(source), source_text
     except (
         OSError,
-        SettingsError,
         TypeError,
         UnicodeDecodeError,
         ValidationError,
@@ -193,3 +295,77 @@ def load_processor(path: Path) -> StatementProcessor:
     ) as error:
         message = f"Could not load processor {path}: {error}"
         raise ProcessorError(message) from error
+
+
+def _dump_processor(processor: StatementProcessor) -> str:
+    """Render a processor as canonical application-managed YAML."""
+    try:
+        return yaml.safe_dump(
+            processor.model_dump(mode="json", exclude_defaults=True),
+            allow_unicode=True,
+            sort_keys=False,
+        )
+    except yaml.YAMLError as error:
+        message = f"Could not serialise processor: {error}"
+        raise ProcessorError(message) from error
+
+
+def _atomic_write(path: Path, source_text: str) -> None:
+    """Write text beside its target and atomically replace the target."""
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            temporary.write(source_text)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+
+        temporary_path.chmod(path.stat().st_mode)
+        temporary_path.replace(path)
+    except OSError as error:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        message = f"Could not save processor {path}: {error}"
+        raise ProcessorError(message) from error
+
+
+def _upsert_tag_rule(column_rules: ColumnRules, replacement: TagRule) -> ColumnRules:
+    """Merge tags into an equivalent rule or append a new ordered rule."""
+    replacement_identity = frozenset(value.casefold() for value in replacement.literals)
+    matches: list[TagRule] = []
+    found_match = False
+
+    for existing in column_rules.matches:
+        existing_identity = frozenset(value.casefold() for value in existing.literals)
+        if existing_identity != replacement_identity:
+            matches.append(existing)
+            continue
+
+        found_match = True
+        tags = _merge_case_insensitive(existing.tags, replacement.tags)
+        matches.append(
+            TagRule(contains=existing.contains, tags=tags, final=existing.final),
+        )
+
+    if not found_match:
+        matches.append(replacement)
+    return ColumnRules(column=column_rules.column, matches=tuple(matches))
+
+
+def _merge_case_insensitive(existing: tuple[str, ...], added: tuple[str, ...]) -> tuple[str, ...]:
+    """Merge strings while preserving the first spelling and order encountered."""
+    merged = list(existing)
+    identities = {value.casefold() for value in existing}
+    for value in added:
+        identity = value.casefold()
+        if identity not in identities:
+            identities.add(identity)
+            merged.append(value)
+    return tuple(merged)

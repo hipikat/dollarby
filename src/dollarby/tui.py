@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, cast, override
 
+from pydantic import ValidationError
 from rich.text import Text
 from textual import on
 from textual.app import App, ComposeResult
@@ -27,9 +29,16 @@ from textual.widgets import (
     TabPane,
 )
 
-from dollarby.data import Statement, TagFilter, TagFilterError, TagFilterField, TransactionView
+from dollarby.data import Statement, TransactionView
+from dollarby.processor import (
+    NewTagRule,
+    ProcessorDocument,
+    ProcessorError,
+    TagRuleField,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from datetime import datetime
 
     import pandas as pd
@@ -50,6 +59,23 @@ TRANSACTION_COLUMNS: tuple[str, ...] = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class SelectedTransaction:
+    """Retain the values needed by actions targeting a displayed transaction."""
+
+    merchant: str
+    details: str
+    processed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SavedTagRule:
+    """Report a successfully persisted rule and its dataframe effect."""
+
+    rule: NewTagRule
+    changed_transactions: int
+
+
 class TransactionTable(DataTable[object]):
     """Display transactions with familiar Vim-style navigation."""
 
@@ -63,6 +89,53 @@ class TransactionTable(DataTable[object]):
         Binding("g", "scroll_top", "Top", show=False),
         Binding("G", "scroll_bottom", "Bottom", show=False),
     ]
+
+    def __init__(self, *, widget_id: str) -> None:
+        """Create a consistently configured transaction table."""
+        super().__init__(id=widget_id, cursor_type="row", zebra_stripes=True)
+        self._transactions: list[SelectedTransaction] = []
+
+    @override
+    def on_mount(self) -> None:
+        """Install the canonical display columns."""
+        self.add_columns(*TRANSACTION_COLUMNS)
+
+    @property
+    def selected_transaction(self) -> SelectedTransaction | None:
+        """Return action-relevant values from the selected transaction."""
+        if not self.row_count or self.cursor_row >= len(self._transactions):
+            return None
+        return self._transactions[self.cursor_row]
+
+    def replace_transactions(self, transactions: pd.DataFrame) -> None:
+        """Replace the rendered rows and their action metadata."""
+        self.clear()
+        self._transactions = []
+        for transaction in transactions.itertuples(index=False):
+            # pandas-stubs exposes each named tuple value as a broad union; the
+            # statement loader establishes these concrete canonical dtypes.
+            amount = float(cast("int | float", transaction.amount))
+            date = cast("datetime", transaction.date)
+            tags = sorted(
+                cast("frozenset[str]", transaction.tags),
+                key=lambda tag: (tag.casefold(), tag),
+            )
+            selected = SelectedTransaction(
+                merchant=str(transaction.merchant_name),
+                details=str(transaction.transaction_details),
+                processed=bool(tags),
+            )
+            self._transactions.append(selected)
+            self.add_row(
+                _status(processed=selected.processed),
+                date.strftime("%Y-%m-%d"),
+                _amount(amount),
+                selected.merchant,
+                selected.details,
+                str(transaction.transaction_type),
+                ", ".join(tags),
+                key=str(cast("int", transaction.source_row)),
+            )
 
     def action_half_page_down(self) -> None:
         """Move the cursor half a visible page down."""
@@ -82,6 +155,44 @@ class TransactionTable(DataTable[object]):
         if self.show_header:
             content_height -= self.header_height
         return max(content_height // 2, 1)
+
+
+class TransactionResults(Vertical):
+    """Compose and update a transaction table with its shared status bar."""
+
+    def __init__(
+        self,
+        *,
+        table_id: str,
+        summary_id: str,
+        total_id: str,
+        widget_id: str | None = None,
+    ) -> None:
+        """Retain child identifiers used by existing application selectors."""
+        super().__init__(id=widget_id)
+        self._table_id = table_id
+        self._summary_id = summary_id
+        self._total_id = total_id
+
+    @override
+    def compose(self) -> ComposeResult:
+        """Compose the table and its summary and total fields."""
+        yield TransactionTable(widget_id=self._table_id)
+        with Horizontal(classes="status-bar"):
+            yield Static(id=self._summary_id, classes="status-summary")
+            yield Static(id=self._total_id, classes="status-total")
+
+    @property
+    def table(self) -> TransactionTable:
+        """Return this result set's transaction table."""
+        return self.query_one(TransactionTable)
+
+    def show(self, transactions: pd.DataFrame, *, summary: str) -> None:
+        """Replace all visible transaction results and status text."""
+        self.table.replace_transactions(transactions)
+        self.query_one(f"#{self._summary_id}", Static).update(summary)
+        total = float(cast("int | float", transactions["amount"].sum()))
+        self.query_one(f"#{self._total_id}", Static).update(f"Total: {_money(total)}")
 
 
 class TagList(ListView):
@@ -118,11 +229,11 @@ class TagList(ListView):
         self.index = tags.index(active_tag) if active_tag in tags else 0 if tags else None
 
 
-class AddTagFilterDialog(ModalScreen[TagFilter | None]):
-    """Collect one field-specific tag filter without leaving the current view."""
+class AddTagDialog(ModalScreen[SavedTagRule | None]):
+    """Collect and persist one field-specific tag rule."""
 
     CSS = """
-    AddTagFilterDialog {
+    AddTagDialog {
         align: center middle;
     }
 
@@ -206,19 +317,26 @@ class AddTagFilterDialog(ModalScreen[TagFilter | None]):
         Binding("ctrl+s", "save", "Save", show=False, priority=True),
     ]
 
-    def __init__(self, *, merchant: str = "", details: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        merchant: str,
+        details: str,
+        save_rule: Callable[[NewTagRule], int],
+    ) -> None:
         """Create a dialog pre-filled from an optional selected transaction."""
         super().__init__()
         self.merchant = merchant
         self.details = details
+        self._save_rule = save_rule
 
     @override
     def compose(self) -> ComposeResult:
         """Compose the field, match-text, tag, and action controls."""
         with Vertical(id="tag-filter-dialog"):
-            yield Label("Add Tag Filter", id="filter-title")
+            yield Label("Add Tag", id="filter-title")
             yield Static(
-                "Literal matching is case-insensitive. Filters apply to this session only.",
+                "Whole-literal matching is case-insensitive and saved to this processor.",
                 id="filter-help",
             )
             with Horizontal(id="match-fields"):
@@ -269,20 +387,26 @@ class AddTagFilterDialog(ModalScreen[TagFilter | None]):
         field_set = self.query_one("#filter-field", RadioSet)
         pressed = field_set.pressed_button
         field = (
-            TagFilterField.DETAILS
+            TagRuleField.DETAILS
             if pressed is not None and pressed.id == "filter-details"
-            else TagFilterField.MERCHANT
+            else TagRuleField.MERCHANT
         )
-        match_selector = "#details-match" if field is TagFilterField.DETAILS else "#merchant-match"
+        match_selector = "#details-match" if field is TagRuleField.DETAILS else "#merchant-match"
         match = self.query_one(match_selector, Input).value
         raw_tags = self.query_one("#filter-tags", Input).value
 
         try:
-            tag_filter = TagFilter(field=field, match=match, tags=tuple(raw_tags.split(",")))
-        except TagFilterError as error:
+            rule = NewTagRule(field=field, contains=match, tags=tuple(raw_tags.split(",")))
+        except ValidationError as error:
+            self.query_one("#filter-error", Static).update(_validation_message(error))
+            return
+
+        try:
+            changed_transactions = self._save_rule(rule)
+        except ProcessorError as error:
             self.query_one("#filter-error", Static).update(str(error))
             return
-        self.dismiss(tag_filter)
+        self.dismiss(SavedTagRule(rule=rule, changed_transactions=changed_transactions))
 
     def action_cancel(self) -> None:
         """Close the dialog without creating a filter."""
@@ -320,6 +444,8 @@ class DollarbyApp(App[None]):
         border-top: solid $accent;
     }
 
+    TransactionResults { height: 1fr; }
+
     .status-bar { height: 1; }
 
     .status-summary, .status-total {
@@ -347,17 +473,18 @@ class DollarbyApp(App[None]):
     #tag-results { width: 1fr; }
     """
     BINDINGS: ClassVar[list[Binding]] = [
-        Binding("1", "show_statements", "Statements", priority=True),
-        Binding("2", "show_tags", "Tags", priority=True),
-        Binding("a", "add_tag_filter", "Add tag filter"),
+        Binding("1", "show_tab('statements')", "Statements", priority=True),
+        Binding("2", "show_tab('tags')", "Tags", priority=True),
+        Binding("a", "add_tag", "Add tag"),
         Binding("q", "quit", "Quit"),
         Binding("escape", "quit", "Quit", show=False),
     ]
 
-    def __init__(self, statement: Statement) -> None:
+    def __init__(self, statement: Statement, processor_document: ProcessorDocument) -> None:
         """Create the transaction browser for one statement."""
         super().__init__()
         self.statement = statement
+        self.processor_document = processor_document
         self.sub_title = statement.path.name
         self._tables_ready = False
 
@@ -376,29 +503,24 @@ class DollarbyApp(App[None]):
                         compact=True,
                         id="transaction-view",
                     )
-                yield TransactionTable(id="transactions", cursor_type="row", zebra_stripes=True)
-                with Horizontal(classes="status-bar"):
-                    yield Static(id="summary", classes="status-summary")
-                    yield Static(id="total", classes="status-total")
+                yield TransactionResults(
+                    table_id="transactions",
+                    summary_id="summary",
+                    total_id="total",
+                )
             with TabPane("2 Tags", id="tags"), Horizontal(id="tag-browser"):
                 yield TagList(self.statement.tags, widget_id="tag-list")
-                with Vertical(id="tag-results"):
-                    yield TransactionTable(
-                        id="tag-transactions",
-                        cursor_type="row",
-                        zebra_stripes=True,
-                    )
-                    with Horizontal(classes="status-bar"):
-                        yield Static(id="tag-summary", classes="status-summary")
-                        yield Static(id="tag-total", classes="status-total")
+                yield TransactionResults(
+                    table_id="tag-transactions",
+                    summary_id="tag-summary",
+                    total_id="tag-total",
+                    widget_id="tag-results",
+                )
         yield Footer()
 
     def on_mount(self) -> None:
         """Set up and populate the transaction table."""
         statement_table = self.query_one("#transactions", TransactionTable)
-        tag_table = self.query_one("#tag-transactions", TransactionTable)
-        statement_table.add_columns(*TRANSACTION_COLUMNS)
-        tag_table.add_columns(*TRANSACTION_COLUMNS)
         self._tables_ready = True
         self._show_transactions(TransactionView.ALL)
         self._show_tag_transactions(self.query_one(TagList).active_tag)
@@ -427,116 +549,90 @@ class DollarbyApp(App[None]):
         else:
             self.query_one("#transactions", TransactionTable).focus()
 
-    def action_show_statements(self) -> None:
-        """Activate the Statements tab."""
-        self.query_one("#views", TabbedContent).active = "statements"
+    def action_show_tab(self, tab_id: str) -> None:
+        """Activate one application tab by identifier."""
+        self.query_one("#views", TabbedContent).active = tab_id
 
-    def action_show_tags(self) -> None:
-        """Activate the Tags tab."""
-        self.query_one("#views", TabbedContent).active = "tags"
-
-    def action_add_tag_filter(self) -> None:
-        """Open a tag-filter dialog pre-filled from the active transaction table."""
-        merchant, details = self._selected_transaction_text()
-        self.push_screen(
-            AddTagFilterDialog(merchant=merchant, details=details),
-            self._apply_tag_filter,
-        )
-
-    async def _apply_tag_filter(self, tag_filter: TagFilter | None) -> None:
-        """Apply a saved filter and refresh both transaction views."""
-        if tag_filter is None:
+    def action_add_tag(self) -> None:
+        """Open Add Tag for the active unprocessed transaction."""
+        transaction = self._active_transaction_table().selected_transaction
+        if transaction is None:
+            self.notify("Select an unprocessed transaction first", severity="warning")
+            return
+        if transaction.processed:
+            self.notify(
+                "Add Tag is currently limited to unprocessed transactions",
+                severity="warning",
+            )
             return
 
-        match_count = self.statement.apply_tag_filter(tag_filter)
+        self.push_screen(
+            AddTagDialog(
+                merchant=transaction.merchant,
+                details=transaction.details,
+                save_rule=self._persist_tag_rule,
+            ),
+            self._tag_rule_saved,
+        )
+
+    def _persist_tag_rule(self, rule: NewTagRule) -> int:
+        """Save one rule before deterministically reprocessing the statement."""
+        processor = self.processor_document.add_tag_rule(rule)
+        return self.statement.reprocess(processor)
+
+    async def _tag_rule_saved(self, result: SavedTagRule | None) -> None:
+        """Refresh both transaction views after a successful processor write."""
+        if result is None:
+            return
+
         selected_view = self.query_one("#transaction-view", Select).value
         view = selected_view if isinstance(selected_view, TransactionView) else TransactionView.ALL
         self._show_transactions(view)
 
         tag_list = self.query_one("#tag-list", TagList)
         self._tables_ready = False
-        await tag_list.replace_tags(self.statement.tags, active_tag=tag_filter.tags[0])
+        await tag_list.replace_tags(self.statement.tags, active_tag=result.rule.tags[0])
         self._tables_ready = True
         self._show_tag_transactions(tag_list.active_tag)
 
         if self.query_one("#views", TabbedContent).active == "tags":
             tag_list.focus()
-        self.notify(f"Applied {', '.join(tag_filter.tags)} to {match_count:,} transaction(s)")
+        self.notify(
+            f"Saved {', '.join(result.rule.tags)} for "
+            f"{result.changed_transactions:,} transaction(s)",
+        )
 
-    def _selected_transaction_text(self) -> tuple[str, str]:
-        """Return merchant and details from the active view's selected transaction."""
+    def _active_transaction_table(self) -> TransactionTable:
+        """Return the transaction table displayed in the active tab."""
         tab = self.query_one("#views", TabbedContent).active
         selector = "#tag-transactions" if tab == "tags" else "#transactions"
-        table = self.query_one(selector, TransactionTable)
-        if not table.row_count or table.cursor_row >= table.row_count:
-            return "", ""
-
-        row = table.get_row_at(table.cursor_row)
-        return str(row[3]), str(row[4])
+        return self.query_one(selector, TransactionTable)
 
     def _show_transactions(self, view: TransactionView) -> None:
         """Populate the table with transactions from one view."""
-        table = self.query_one("#transactions", TransactionTable)
         selected = self.statement.select(view)
-        self._populate_transactions(table, selected)
-
-        summary = self.query_one("#summary", Static)
-        summary.update(
-            f"{len(selected):,} shown · "
-            f"{self.statement.unprocessed_count:,} unprocessed · "
+        summary = (
+            f"{len(selected):,} shown · {self.statement.unprocessed_count:,} unprocessed · "
             f"{self.statement.processed_count:,} processed · "
-            f"{len(self.statement.transactions):,} total",
+            f"{len(self.statement.transactions):,} total"
         )
-        self._show_total("#total", selected)
+        self.query_one("#statements TransactionResults", TransactionResults).show(
+            selected,
+            summary=summary,
+        )
 
     def _show_tag_transactions(self, tag: str | None) -> None:
         """Populate the tag browser for one highlighted tag."""
-        table = self.query_one("#tag-transactions", TransactionTable)
         selected = (
             self.statement.transactions.iloc[0:0] if tag is None else self.statement.select_tag(tag)
         )
-        self._populate_transactions(table, selected)
-
-        summary = self.query_one("#tag-summary", Static)
-        if tag is None:
-            summary.update("No tags in this statement")
-        else:
-            summary.update(f"{len(selected):,} shown · {tag}")
-        self._show_total("#tag-total", selected)
-
-    def _show_total(self, selector: str, transactions: pd.DataFrame) -> None:
-        """Show the total amount for the transactions visible in one view."""
-        total = float(cast("int | float", transactions["amount"].sum()))
-        self.query_one(selector, Static).update(f"Total: ${total:,.2f}")
-
-    def _populate_transactions(
-        self,
-        table: TransactionTable,
-        transactions: pd.DataFrame,
-    ) -> None:
-        """Render canonical transactions into one transaction table."""
-        table.clear()
-        for transaction in transactions.itertuples(index=False):
-            # pandas-stubs exposes each named tuple value as a broad union; the
-            # statement loader establishes these concrete canonical dtypes.
-            amount = float(cast("int | float", transaction.amount))
-            date = cast("datetime", transaction.date)
-            tags = sorted(cast("frozenset[str]", transaction.tags))
-            table.add_row(
-                _status(processed=bool(tags)),
-                date.strftime("%Y-%m-%d"),
-                _amount(amount),
-                str(transaction.merchant_name),
-                str(transaction.transaction_details),
-                str(transaction.transaction_type),
-                ", ".join(tags),
-                key=str(cast("int", transaction.source_row)),
-            )
+        summary = "No tags in this statement" if tag is None else f"{len(selected):,} shown · {tag}"
+        self.query_one("#tag-results", TransactionResults).show(selected, summary=summary)
 
 
-def run_tui(statement: Statement) -> None:
+def run_tui(statement: Statement, processor_document: ProcessorDocument) -> None:
     """Run Dollarby's full-screen transaction browser."""
-    DollarbyApp(statement).run()
+    DollarbyApp(statement, processor_document).run()
 
 
 def _status(*, processed: bool) -> Text:
@@ -549,4 +645,15 @@ def _status(*, processed: bool) -> Text:
 def _amount(amount: float) -> Text:
     """Render an amount with sign-aware colour."""
     style = "green" if amount >= 0 else "red"
-    return Text(f"${amount:,.2f}", style=style, justify="right")
+    return Text(_money(amount), style=style, justify="right")
+
+
+def _money(amount: float) -> str:
+    """Format one monetary value consistently across tables and totals."""
+    return f"${amount:,.2f}"
+
+
+def _validation_message(error: ValidationError) -> str:
+    """Extract the first actionable message from Pydantic validation output."""
+    message = str(error.errors()[0]["msg"])
+    return message.removeprefix("Value error, ")

@@ -2,21 +2,27 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 from textual.containers import Vertical
 from textual.widgets import Input, RadioButton, Select, Static, TabbedContent
 
-from dollarby.data import Statement, TagFilterField, TransactionView
-from dollarby.tui import AddTagFilterDialog, DollarbyApp, TagList, TransactionTable
+from dollarby.data import Statement, TransactionView
+from dollarby.tui import AddTagDialog, DollarbyApp, TagList, TransactionTable
+
+if TYPE_CHECKING:
+    from dollarby.processor import ProcessorDocument
 
 pytestmark = pytest.mark.asyncio
 
 
 async def test_transaction_view_selector_filters_rows(
     partly_processed_statement: Statement,
+    processor_document: ProcessorDocument,
 ) -> None:
     """Default to all transactions and switch between processing states."""
-    app = DollarbyApp(partly_processed_statement)
+    app = DollarbyApp(partly_processed_statement, processor_document)
 
     async with app.run_test() as pilot:
         table = app.query_one("#transactions", TransactionTable)
@@ -42,9 +48,10 @@ async def test_transaction_view_selector_filters_rows(
 
 async def test_processed_row_displays_its_processor_tags(
     partly_processed_statement: Statement,
+    processor_document: ProcessorDocument,
 ) -> None:
     """Show processor-derived tags alongside a transaction in the default view."""
-    app = DollarbyApp(partly_processed_statement)
+    app = DollarbyApp(partly_processed_statement, processor_document)
 
     async with app.run_test():
         table = app.query_one("#transactions", TransactionTable)
@@ -53,9 +60,12 @@ async def test_processed_row_displays_its_processor_tags(
         assert row[6] == "food, restaurant"
 
 
-async def test_number_keys_select_application_tabs(statement: Statement) -> None:
+async def test_number_keys_select_application_tabs(
+    statement: Statement,
+    processor_document: ProcessorDocument,
+) -> None:
     """Select the Statements and Tags tabs by their displayed number."""
-    app = DollarbyApp(statement)
+    app = DollarbyApp(statement, processor_document)
 
     async with app.run_test() as pilot:
         tabs = app.query_one("#views", TabbedContent)
@@ -74,9 +84,10 @@ async def test_number_keys_select_application_tabs(statement: Statement) -> None
 
 async def test_tag_list_filters_transactions(
     multi_tagged_statement: Statement,
+    processor_document: ProcessorDocument,
 ) -> None:
     """List tags alphabetically and update the transaction list from its highlight."""
-    app = DollarbyApp(multi_tagged_statement)
+    app = DollarbyApp(multi_tagged_statement, processor_document)
 
     async with app.run_test() as pilot:
         await pilot.press("2")
@@ -98,17 +109,19 @@ async def test_tag_list_filters_transactions(
         assert str(total.content) == "Total: $-2.00"
 
 
-async def test_add_filter_dialog_is_prefilled_from_selected_transaction(
+async def test_add_tag_dialog_is_prefilled_from_selected_transaction(
     statement: Statement,
+    processor_document: ProcessorDocument,
 ) -> None:
     """Open the modal with editable merchant and details text from the selected row."""
-    app = DollarbyApp(statement)
+    app = DollarbyApp(statement, processor_document)
+    source = processor_document.path.read_text(encoding="utf-8")
 
     async with app.run_test() as pilot:
         await pilot.press("j", "a")
 
         dialog = app.screen
-        assert isinstance(dialog, AddTagFilterDialog)
+        assert isinstance(dialog, AddTagDialog)
         panel = dialog.query_one("#tag-filter-dialog", Vertical)
         merchant_radio = dialog.query_one("#filter-merchant", RadioButton)
         details_radio = dialog.query_one("#filter-details", RadioButton)
@@ -126,82 +139,114 @@ async def test_add_filter_dialog_is_prefilled_from_selected_transaction(
         merchant_input.value = "Edited Merchant"
         await pilot.press("escape")
 
-        assert not isinstance(app.screen, AddTagFilterDialog)
-        assert statement.tag_filters == []
+        assert not isinstance(app.screen, AddTagDialog)
+        assert processor_document.path.read_text(encoding="utf-8") == source
 
 
-async def test_add_filter_dialog_is_prefilled_from_tags_view(
+async def test_add_tag_rejects_processed_transaction_in_tags_view(
     multi_tagged_statement: Statement,
+    processor_document: ProcessorDocument,
 ) -> None:
-    """Use the selected transaction from the active Tags tab when opening the modal."""
-    app = DollarbyApp(multi_tagged_statement)
+    """Avoid appending an unreachable final rule for an already processed row."""
+    app = DollarbyApp(multi_tagged_statement, processor_document)
 
     async with app.run_test() as pilot:
         await pilot.press("2", "a")
 
         dialog = app.screen
-        assert isinstance(dialog, AddTagFilterDialog)
-        assert dialog.query_one("#merchant-match", Input).value == "Grill'd"
-
-        await pilot.press("escape")
+        assert not isinstance(dialog, AddTagDialog)
 
 
-async def test_filter_dialog_saves_merchant_filter_and_refreshes_views(
+async def test_add_tag_dialog_saves_merchant_rule_and_refreshes_views(
     statement: Statement,
+    processor_document: ProcessorDocument,
 ) -> None:
     """Apply comma-separated tags to all matching merchants and expose the new tags."""
-    app = DollarbyApp(statement)
+    app = DollarbyApp(statement, processor_document)
 
     async with app.run_test() as pilot:
         await pilot.press("a")
         dialog = app.screen
-        assert isinstance(dialog, AddTagFilterDialog)
+        assert isinstance(dialog, AddTagDialog)
         dialog.query_one("#merchant-match", Input).value = "example merchant"
         dialog.query_one("#filter-tags", Input).value = "Work, recurring, work"
 
         await pilot.click("#save-filter")
         await pilot.pause()
 
-        assert not isinstance(app.screen, AddTagFilterDialog)
-        assert statement.tag_filters[0].field is TagFilterField.MERCHANT
+        assert not isinstance(app.screen, AddTagDialog)
+        written_rule = processor_document.processor.tagging.rules[0].matches[-1]
+        assert written_rule.contains == "example merchant"
+        assert written_rule.tags == ("Work", "recurring")
         assert statement.tags == ("recurring", "Work")
         assert all(
             tags == frozenset({"Work", "recurring"}) for tags in statement.transactions["tags"]
         )
         assert app.query_one("#tag-list", TagList).active_tag == "Work"
         statement_row = app.query_one("#transactions", TransactionTable).get_row_at(0)
-        assert statement_row[6] == "Work, recurring"
+        assert statement_row[6] == "recurring, Work"
 
 
-async def test_filter_dialog_applies_selected_details_field(statement: Statement) -> None:
+async def test_add_tag_dialog_applies_selected_details_field(
+    statement: Statement,
+    processor_document: ProcessorDocument,
+) -> None:
     """Use the selected radio field and show validation errors without closing the modal."""
-    app = DollarbyApp(statement)
+    app = DollarbyApp(statement, processor_document)
 
     async with app.run_test() as pilot:
         await pilot.press("a")
         dialog = app.screen
-        assert isinstance(dialog, AddTagFilterDialog)
+        assert isinstance(dialog, AddTagDialog)
         dialog.query_one("#filter-details", RadioButton).value = True
         dialog.query_one("#details-match", Input).value = "PURCHASE 2"
 
         await pilot.click("#save-filter")
-        assert isinstance(app.screen, AddTagFilterDialog)
+        assert isinstance(app.screen, AddTagDialog)
         assert str(dialog.query_one("#filter-error", Static).content) == "Enter at least one tag"
 
         dialog.query_one("#filter-tags", Input).value = "Personal"
         dialog.action_save()
         await pilot.pause()
 
-        assert statement.tag_filters[0].field is TagFilterField.DETAILS
+        written_rule = processor_document.processor.tagging.rules[1].matches[-1]
+        assert written_rule.contains == "PURCHASE 2"
+        assert written_rule.tags == ("Personal",)
         assert list(statement.transactions["tags"]) == [
             frozenset(),
             frozenset({"Personal"}),
         ]
 
 
-async def test_j_and_k_move_the_transaction_cursor(large_statement: Statement) -> None:
+async def test_processor_write_failure_keeps_add_tag_open(
+    statement: Statement,
+    processor_document: ProcessorDocument,
+) -> None:
+    """Show write errors without closing the modal or changing dataframe tags."""
+    app = DollarbyApp(statement, processor_document)
+    source = processor_document.path.read_text(encoding="utf-8")
+
+    async with app.run_test() as pilot:
+        await pilot.press("a")
+        dialog = app.screen
+        assert isinstance(dialog, AddTagDialog)
+        dialog.query_one("#filter-tags", Input).value = "Work"
+        processor_document.path.write_text(f"{source}\n", encoding="utf-8")
+
+        await pilot.click("#save-filter")
+
+        assert isinstance(app.screen, AddTagDialog)
+        error = str(dialog.query_one("#filter-error", Static).content)
+        assert "changed after Dollarby loaded" in error
+        assert all(not tags for tags in statement.transactions["tags"])
+
+
+async def test_j_and_k_move_the_transaction_cursor(
+    large_statement: Statement,
+    processor_document: ProcessorDocument,
+) -> None:
     """Move down with j and back up with k while the table has focus."""
-    app = DollarbyApp(large_statement)
+    app = DollarbyApp(large_statement, processor_document)
 
     async with app.run_test() as pilot:
         table = app.query_one("#transactions", TransactionTable)
@@ -211,9 +256,12 @@ async def test_j_and_k_move_the_transaction_cursor(large_statement: Statement) -
         assert table.cursor_row == 1
 
 
-async def test_ctrl_keys_move_by_full_and_half_pages(large_statement: Statement) -> None:
+async def test_ctrl_keys_move_by_full_and_half_pages(
+    large_statement: Statement,
+    processor_document: ProcessorDocument,
+) -> None:
     """Support Vim's full-page and half-page vertical movements."""
-    app = DollarbyApp(large_statement)
+    app = DollarbyApp(large_statement, processor_document)
 
     async with app.run_test() as pilot:
         table = app.query_one("#transactions", TransactionTable)
@@ -233,9 +281,12 @@ async def test_ctrl_keys_move_by_full_and_half_pages(large_statement: Statement)
         assert table.cursor_row == 0
 
 
-async def test_g_and_uppercase_g_move_to_extremes(large_statement: Statement) -> None:
+async def test_g_and_uppercase_g_move_to_extremes(
+    large_statement: Statement,
+    processor_document: ProcessorDocument,
+) -> None:
     """Use g and G for the first and last transaction."""
-    app = DollarbyApp(large_statement)
+    app = DollarbyApp(large_statement, processor_document)
 
     async with app.run_test() as pilot:
         table = app.query_one("#transactions", TransactionTable)

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from dollarby.data import Statement, load_statement
-from dollarby.processor import DEFAULT_PROCESSOR_PATH, StatementProcessor, load_processor
+from dollarby.processor import DEFAULT_PROCESSOR_PATH, ProcessorDocument, StatementProcessor
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -45,9 +45,17 @@ def statement_path(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def processor() -> StatementProcessor:
-    """Return Dollarby's initial NAB statement processor."""
-    return load_processor(DEFAULT_PROCESSOR_PATH)
+def processor_document(tmp_path: Path) -> ProcessorDocument:
+    """Return a writable temporary copy of the local statement processor."""
+    path = tmp_path / "processor.yaml"
+    path.write_text(DEFAULT_PROCESSOR_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+    return ProcessorDocument.load(path)
+
+
+@pytest.fixture
+def processor(processor_document: ProcessorDocument) -> StatementProcessor:
+    """Return the validated processor from a writable test document."""
+    return processor_document.processor
 
 
 @pytest.fixture

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final, cast
 
@@ -34,69 +34,12 @@ class TransactionView(StrEnum):
     ALL = "all"
 
 
-class TagFilterField(StrEnum):
-    """Choose the canonical text column matched by an interactive tag filter."""
-
-    MERCHANT = "merchant_name"
-    DETAILS = "transaction_details"
-
-
-class TagFilterError(ValueError):
-    """Indicate that an interactive tag filter is incomplete."""
-
-
-class MissingTagFilterMatchError(TagFilterError):
-    """Indicate that a tag filter has no text to match."""
-
-    def __init__(self) -> None:
-        """Create an actionable validation error."""
-        super().__init__("Enter text to match")
-
-
-class MissingTagFilterTagsError(TagFilterError):
-    """Indicate that a tag filter has no tags to apply."""
-
-    def __init__(self) -> None:
-        """Create an actionable validation error."""
-        super().__init__("Enter at least one tag")
-
-
-@dataclass(frozen=True, slots=True)
-class TagFilter:
-    """Apply tags when one canonical transaction field contains literal text."""
-
-    field: TagFilterField
-    match: str
-    tags: tuple[str, ...]
-
-    def __post_init__(self) -> None:
-        """Normalise and validate values entered through the tag-filter dialog."""
-        match = self.match.strip()
-        if not match:
-            raise MissingTagFilterMatchError
-
-        tags: list[str] = []
-        seen: set[str] = set()
-        for raw_tag in self.tags:
-            tag = raw_tag.strip()
-            identity = tag.casefold()
-            if tag and identity not in seen:
-                seen.add(identity)
-                tags.append(tag)
-        if not tags:
-            raise MissingTagFilterTagsError
-
-        object.__setattr__(self, "match", match)
-        object.__setattr__(self, "tags", tuple(tags))
-
-
 @dataclass(slots=True)
 class Statement:
     """A source statement and its normalised transactions."""
 
     path: Path
     transactions: pd.DataFrame
-    tag_filters: list[TagFilter] = field(default_factory=list)
 
     @property
     def processed_mask(self) -> pd.Series[bool]:
@@ -137,27 +80,17 @@ class Statement:
         )
         return self.transactions.loc[mask]
 
-    def apply_tag_filter(self, tag_filter: TagFilter) -> int:
-        """Apply one case-insensitive literal filter to this statement's transactions."""
-        mask = self.transactions[tag_filter.field].str.contains(
-            tag_filter.match,
-            case=False,
-            regex=False,
-            na=False,
-        )
-        matches = mask.tolist()
-        current_tags = cast("list[frozenset[str]]", self.transactions["tags"].tolist())
-        added_tags = frozenset(tag_filter.tags)
-        self.transactions["tags"] = pd.Series(
-            [
-                tags | added_tags if matched else tags
-                for tags, matched in zip(current_tags, matches, strict=True)
-            ],
-            index=self.transactions.index,
-            dtype="object",
-        )
-        self.tag_filters.append(tag_filter)
-        return sum(matches)
+    def reprocess(self, processor: StatementProcessor) -> int:
+        """Recalculate all tags and return the number of rows whose tags changed."""
+        if "tags" in self.transactions:
+            previous = cast("list[frozenset[str]]", self.transactions["tags"].tolist())
+        else:
+            previous = [frozenset() for _ in range(len(self.transactions))]
+
+        updated = _transaction_tags(self.transactions, processor)
+        current = cast("list[frozenset[str]]", updated.tolist())
+        self.transactions["tags"] = updated
+        return sum(before != after for before, after in zip(previous, current, strict=True))
 
 
 def load_statement(path: Path, processor: StatementProcessor) -> Statement:
@@ -212,11 +145,11 @@ def load_statement(path: Path, processor: StatementProcessor) -> Statement:
     for column in TEXT_COLUMNS:
         transactions[column] = transactions[column].fillna("").astype("string")
 
-    # Add source references and tags inferred from the processor's ordered rules.
+    # Add source references and infer tags from the processor's ordered rules.
     transactions.insert(0, "source_row", range(2, len(transactions) + 2))
-    transactions = transactions.assign(tags=_transaction_tags(transactions, processor))
-
-    return Statement(path=path, transactions=transactions)
+    statement = Statement(path=path, transactions=transactions)
+    statement.reprocess(processor)
+    return statement
 
 
 def _transaction_tags(

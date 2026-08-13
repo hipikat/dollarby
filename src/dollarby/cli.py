@@ -7,7 +7,7 @@ from pathlib import Path
 import click
 
 from dollarby.data import StatementError, load_statement
-from dollarby.processor import DEFAULT_PROCESSOR_PATH, ProcessorError, load_processor
+from dollarby.processor import DEFAULT_PROCESSOR_PATH, ProcessorDocument, ProcessorError
 from dollarby.tui import run_tui
 
 
@@ -24,9 +24,9 @@ def cli() -> None:
 def open_statement(statement_file: Path) -> None:
     """Open STATEMENT_FILE in Dollarby's interactive transaction browser."""
     try:
-        processor = load_processor(DEFAULT_PROCESSOR_PATH)
-        statement = load_statement(statement_file, processor)
+        processor_document = ProcessorDocument.load(DEFAULT_PROCESSOR_PATH)
+        statement = load_statement(statement_file, processor_document.processor)
     except (ProcessorError, StatementError) as error:
         raise click.ClickException(str(error)) from error
 
-    run_tui(statement)
+    run_tui(statement, processor_document)

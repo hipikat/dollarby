@@ -10,12 +10,10 @@ import pytest
 from dollarby.data import (
     Statement,
     StatementError,
-    TagFilter,
-    TagFilterField,
     TransactionView,
     load_statement,
 )
-from dollarby.processor import ColumnRules, TagRule
+from dollarby.processor import ColumnRules, NewTagRule, TagRule, TagRuleField
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -90,7 +88,7 @@ def test_statement_tags_transaction_details_rules(
 ) -> None:
     """Apply each local details rule case-insensitively without copying its private match text."""
     rule = processor.tagging.rules[1].matches[rule_index]
-    match_text = _literal_match(rule.regex).swapcase()
+    match_text = rule.literals[0].swapcase()
     source = statement_path.read_text(encoding="utf-8")
     statement_path.write_text(
         source.replace("Example purchase 1", f"Payment {match_text} reference", 1),
@@ -108,7 +106,7 @@ def test_statement_does_not_apply_rules_to_the_other_field(
     processor: StatementProcessor,
 ) -> None:
     """Avoid evaluating each expression against both transaction fields."""
-    details_match = _literal_match(processor.tagging.rules[1].matches[0].regex)
+    details_match = processor.tagging.rules[1].matches[0].literals[0]
     source = statement_path.read_text(encoding="utf-8")
     source = source.replace("Example Merchant 1", details_match, 1)
     source = source.replace("Example purchase 1", "Vodafone AU", 1)
@@ -145,8 +143,8 @@ def test_final_rule_stops_later_tag_processing(
     processor: StatementProcessor,
 ) -> None:
     """Stop processing a row after a final rule while respecting word boundaries."""
-    details_match = _literal_match(processor.tagging.rules[1].matches[0].regex)
-    near_match = _literal_match(processor.tagging.rules[1].matches[1].regex)
+    details_match = processor.tagging.rules[1].matches[0].literals[0]
+    near_match = processor.tagging.rules[1].matches[1].literals[0]
     source = statement_path.read_text(encoding="utf-8")
     source = source.replace("Example Merchant 1", "Grill'd Liquorland", 1)
     source = source.replace("Example purchase 1", details_match, 1)
@@ -171,8 +169,8 @@ def test_explicit_non_final_rule_allows_later_tags(
         ColumnRules(
             column="merchant_name",
             matches=(
-                TagRule(regex=r"\bExample\b", tags=("deductible",), final=False),
-                TagRule(regex=r"\bMerchant\b", tags=("merchant",)),
+                TagRule(contains="Example", tags=("deductible",), final=False),
+                TagRule(contains="Merchant", tags=("merchant",)),
             ),
         ),
     )
@@ -213,20 +211,23 @@ def test_statement_lists_and_selects_tags(statement: Statement) -> None:
     assert list(tagged_statement.select_tag("beta")["source_row"]) == [3]
 
 
-def test_statement_applies_case_insensitive_literal_tag_filter(statement: Statement) -> None:
-    """Add normalised tags to every literal field match and remember the session filter."""
-    tag_filter = TagFilter(
-        field=TagFilterField.MERCHANT,
-        match="  example merchant  ",
+def test_statement_reprocesses_with_an_added_case_insensitive_rule(
+    statement: Statement,
+    processor: StatementProcessor,
+) -> None:
+    """Replace inferred tags using an updated processor rather than session mutations."""
+    new_rule = NewTagRule(
+        field=TagRuleField.MERCHANT,
+        contains="  example merchant  ",
         tags=("Work", " recurring ", "work", ""),
     )
+    updated_processor = processor.with_tag_rule(new_rule)
 
-    match_count = statement.apply_tag_filter(tag_filter)
+    changed_count = statement.reprocess(updated_processor)
 
-    assert match_count == len(statement.transactions)
-    assert tag_filter.match == "example merchant"
-    assert tag_filter.tags == ("Work", "recurring")
-    assert statement.tag_filters == [tag_filter]
+    assert changed_count == len(statement.transactions)
+    assert new_rule.contains == "example merchant"
+    assert new_rule.tags == ("Work", "recurring")
     assert list(statement.transactions["tags"]) == [
         frozenset({"Work", "recurring"}),
         frozenset({"Work", "recurring"}),
@@ -234,20 +235,20 @@ def test_statement_applies_case_insensitive_literal_tag_filter(statement: Statem
 
 
 @pytest.mark.parametrize(
-    ("match", "tags", "message"),
+    ("contains", "tags", "message"),
     [
         (" ", ("personal",), "Enter text to match"),
         ("Example", (" ", ""), "Enter at least one tag"),
     ],
 )
-def test_tag_filter_rejects_incomplete_values(
-    match: str,
+def test_new_tag_rule_rejects_incomplete_values(
+    contains: str,
     tags: tuple[str, ...],
     message: str,
 ) -> None:
-    """Reject filters without usable match text or tags."""
+    """Reject new rules without usable match text or tags."""
     with pytest.raises(ValueError, match=message):
-        TagFilter(field=TagFilterField.DETAILS, match=match, tags=tags)
+        NewTagRule(field=TagRuleField.DETAILS, contains=contains, tags=tags)
 
 
 @pytest.mark.parametrize(
@@ -263,8 +264,3 @@ def test_statement_selects_processing_views(
         len(partly_processed_statement.transactions) if view is TransactionView.ALL else 1
     )
     assert len(partly_processed_statement.select(view)) == expected_count
-
-
-def _literal_match(expression: str) -> str:
-    """Extract a private literal from a simple word-bounded processor expression."""
-    return expression.removeprefix(r"\b").removesuffix(r"\b")
