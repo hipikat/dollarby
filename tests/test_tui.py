@@ -242,12 +242,17 @@ async def test_add_tag_dialog_applies_selected_details_field(
         dialog.action_save()
         await pilot.pause()
 
-        written_rule = processor_document.processor.tagging.rules[1].matches[-1]
-        assert written_rule.contains == "PURCHASE 2"
-        assert written_rule.tags == ("Personal",)
+        personal_rules = tuple(
+            rule
+            for rule in processor_document.processor.tagging.rules[1].matches
+            if tuple(tag.casefold() for tag in rule.tags) == ("personal",)
+        )
+        assert len(personal_rules) == 1
+        assert "PURCHASE 2" in personal_rules[0].literals
+        assert personal_rules[0].tags == ("personal",)
         assert list(statement.transactions["tags"]) == [
             frozenset(),
-            frozenset({"Personal"}),
+            frozenset({"personal"}),
         ]
 
 

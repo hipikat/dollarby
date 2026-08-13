@@ -131,6 +131,34 @@ def test_processor_document_merges_tags_into_an_equivalent_rule(
     assert written.tags == ("Work", "Recurring")
 
 
+def test_processor_document_merges_matches_with_an_equivalent_tag_set(
+    processor_document: ProcessorDocument,
+) -> None:
+    """Collect same-column matches under one case-insensitively equal tag set."""
+    first = NewTagRule(
+        field=TagRuleField.MERCHANT,
+        contains="Synthetic Merchant",
+        tags=("Work", "Recurring"),
+    )
+    second = NewTagRule(
+        field=TagRuleField.MERCHANT,
+        contains="Another Merchant",
+        tags=("recurring", "work"),
+    )
+    initial_count = len(processor_document.processor.tagging.rules[0].matches)
+
+    processor_document.add_tag_rule(first)
+    updated = processor_document.add_tag_rule(second)
+    written = updated.tagging.rules[0].matches[-1]
+    pattern = written.compile(case_sensitive=False)
+
+    assert len(updated.tagging.rules[0].matches) == initial_count + 1
+    assert written.contains == ("Synthetic Merchant", "Another Merchant")
+    assert written.tags == ("Work", "Recurring")
+    assert pattern.search("SYNTHETIC MERCHANT") is not None
+    assert pattern.search("another merchant") is not None
+
+
 def test_processor_document_refuses_to_overwrite_external_changes(
     processor_document: ProcessorDocument,
 ) -> None:

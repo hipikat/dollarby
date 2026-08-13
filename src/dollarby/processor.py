@@ -339,25 +339,33 @@ def _atomic_write(path: Path, source_text: str) -> None:
 
 
 def _upsert_tag_rule(column_rules: ColumnRules, replacement: TagRule) -> ColumnRules:
-    """Merge tags into an equivalent rule or append a new ordered rule."""
-    replacement_identity = frozenset(value.casefold() for value in replacement.literals)
-    matches: list[TagRule] = []
-    found_match = False
+    """Merge equivalent matches or tag sets before appending an ordered rule."""
+    matches = list(column_rules.matches)
+    replacement_literals = _casefolded(replacement.literals)
 
-    for existing in column_rules.matches:
-        existing_identity = frozenset(value.casefold() for value in existing.literals)
-        if existing_identity != replacement_identity:
-            matches.append(existing)
+    for index, existing in enumerate(matches):
+        if _casefolded(existing.literals) != replacement_literals:
             continue
-
-        found_match = True
-        tags = _merge_case_insensitive(existing.tags, replacement.tags)
-        matches.append(
-            TagRule(contains=existing.contains, tags=tags, final=existing.final),
+        matches[index] = TagRule(
+            contains=existing.contains,
+            tags=_merge_case_insensitive(existing.tags, replacement.tags),
+            final=existing.final,
         )
+        return ColumnRules(column=column_rules.column, matches=tuple(matches))
 
-    if not found_match:
-        matches.append(replacement)
+    replacement_tags = _casefolded(replacement.tags)
+    for index, existing in enumerate(matches):
+        if (
+            existing.final is not replacement.final
+            or _casefolded(existing.tags) != replacement_tags
+        ):
+            continue
+        literals = _merge_case_insensitive(existing.literals, replacement.literals)
+        contains = literals[0] if len(literals) == 1 else literals
+        matches[index] = TagRule(contains=contains, tags=existing.tags, final=existing.final)
+        return ColumnRules(column=column_rules.column, matches=tuple(matches))
+
+    matches.append(replacement)
     return ColumnRules(column=column_rules.column, matches=tuple(matches))
 
 
@@ -371,3 +379,8 @@ def _merge_case_insensitive(existing: tuple[str, ...], added: tuple[str, ...]) -
             identities.add(identity)
             merged.append(value)
     return tuple(merged)
+
+
+def _casefolded(values: tuple[str, ...]) -> frozenset[str]:
+    """Return an order-independent identity for literals or tags."""
+    return frozenset(value.casefold() for value in values)
