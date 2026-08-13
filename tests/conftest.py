@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pandas as pd
 import pytest
 
 from dollarby.data import Statement, load_statement
@@ -89,6 +90,19 @@ def multi_tagged_statement(
     source = source.replace("Example Merchant 2", "Vodafone", 1)
     statement_path.write_text(source, encoding="utf-8")
     return load_statement(statement_path, processor)
+
+
+@pytest.fixture
+def hidden_tagged_statement(statement: Statement) -> Statement:
+    """Return one hidden processed row and one visible unprocessed row."""
+    tags = [
+        frozenset({"Alcohol"}) if index == 0 else frozenset()
+        for index in range(len(statement.transactions))
+    ]
+    transactions = statement.transactions.assign(
+        tags=pd.Series(tags, index=statement.transactions.index, dtype="object"),
+    )
+    return Statement(path=statement.path, transactions=transactions)
 
 
 @pytest.fixture

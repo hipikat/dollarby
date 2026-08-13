@@ -220,7 +220,7 @@ class TagList(ListView):
             return None
         return self.tags[self.index]
 
-    async def replace_tags(self, tags: tuple[str, ...], *, active_tag: str) -> None:
+    async def replace_tags(self, tags: tuple[str, ...], *, active_tag: str | None) -> None:
         """Replace the available tags and highlight one requested tag."""
         self.index = None
         await self.clear()
@@ -476,6 +476,7 @@ class DollarbyApp(App[None]):
         Binding("1", "show_tab('statements')", "Statements", priority=True),
         Binding("2", "show_tab('tags')", "Tags", priority=True),
         Binding("a", "add_tag", "Add tag"),
+        Binding("h", "toggle_ignored", "Toggle ignored"),
         Binding("q", "quit", "Quit"),
         Binding("escape", "quit", "Quit", show=False),
     ]
@@ -487,6 +488,7 @@ class DollarbyApp(App[None]):
         self.processor_document = processor_document
         self.sub_title = statement.path.name
         self._tables_ready = False
+        self._show_hidden_tags = False
 
     @override
     def compose(self) -> ComposeResult:
@@ -509,7 +511,7 @@ class DollarbyApp(App[None]):
                     total_id="total",
                 )
             with TabPane("2 Tags", id="tags"), Horizontal(id="tag-browser"):
-                yield TagList(self.statement.tags, widget_id="tag-list")
+                yield TagList(self._visible_tags(), widget_id="tag-list")
                 yield TransactionResults(
                     table_id="tag-transactions",
                     summary_id="tag-summary",
@@ -540,18 +542,25 @@ class DollarbyApp(App[None]):
             self._show_tag_transactions(tag_list.active_tag)
 
     @on(TabbedContent.TabActivated, "#views")
-    def focus_active_view(self, event: TabbedContent.TabActivated) -> None:
+    def focus_active_view(self, _event: TabbedContent.TabActivated) -> None:
         """Move focus into the active tab's primary list."""
         if not self._tables_ready:
             return
-        if event.pane.id == "tags":
-            self.query_one("#tag-list", TagList).focus()
-        else:
-            self.query_one("#transactions", TransactionTable).focus()
+        self._focus_active_view()
 
     def action_show_tab(self, tab_id: str) -> None:
         """Activate one application tab by identifier."""
         self.query_one("#views", TabbedContent).active = tab_id
+
+    async def action_toggle_ignored(self) -> None:
+        """Toggle application-wide visibility of hidden-tagged transactions."""
+        tag_list = self.query_one("#tag-list", TagList)
+        active_tag = tag_list.active_tag
+        self._show_hidden_tags = not self._show_hidden_tags
+        await self._refresh_views(active_tag=active_tag)
+        self._focus_active_view()
+        state = "Showing" if self._show_hidden_tags else "Hiding"
+        self.notify(f"{state} ignored transactions")
 
     def action_add_tag(self) -> None:
         """Open Add Tag for the active unprocessed transaction."""
@@ -585,18 +594,8 @@ class DollarbyApp(App[None]):
         if result is None:
             return
 
-        selected_view = self.query_one("#transaction-view", Select).value
-        view = selected_view if isinstance(selected_view, TransactionView) else TransactionView.ALL
-        self._show_transactions(view)
-
-        tag_list = self.query_one("#tag-list", TagList)
-        self._tables_ready = False
-        await tag_list.replace_tags(self.statement.tags, active_tag=result.rule.tags[0])
-        self._tables_ready = True
-        self._show_tag_transactions(tag_list.active_tag)
-
-        if self.query_one("#views", TabbedContent).active == "tags":
-            tag_list.focus()
+        await self._refresh_views(active_tag=result.rule.tags[0])
+        self._focus_active_view()
         self.notify(
             f"Saved {', '.join(result.rule.tags)} for "
             f"{result.changed_transactions:,} transaction(s)",
@@ -608,13 +607,51 @@ class DollarbyApp(App[None]):
         selector = "#tag-transactions" if tab == "tags" else "#transactions"
         return self.query_one(selector, TransactionTable)
 
+    def _focus_active_view(self) -> None:
+        """Focus the primary control in the currently active tab."""
+        if self.query_one("#views", TabbedContent).active == "tags":
+            self.query_one("#tag-list", TagList).focus()
+        else:
+            self.query_one("#transactions", TransactionTable).focus()
+
+    async def _refresh_views(self, *, active_tag: str | None) -> None:
+        """Refresh every view from the application-wide hidden-tag state."""
+        selected_view = self.query_one("#transaction-view", Select).value
+        view = selected_view if isinstance(selected_view, TransactionView) else TransactionView.ALL
+        self._show_transactions(view)
+
+        tag_list = self.query_one("#tag-list", TagList)
+        self._tables_ready = False
+        await tag_list.replace_tags(self._visible_tags(), active_tag=active_tag)
+        self._tables_ready = True
+        self._show_tag_transactions(tag_list.active_tag)
+
+    @property
+    def _hidden_tags(self) -> tuple[str, ...]:
+        """Return the active processor's globally hidden tags."""
+        return self.processor_document.processor.tagging.hidden_tags
+
+    def _select_transactions(self, view: TransactionView) -> pd.DataFrame:
+        """Select rows using the global hidden-tag visibility state."""
+        return self.statement.select(
+            view,
+            hidden_tags=self._hidden_tags,
+            include_hidden=self._show_hidden_tags,
+        )
+
+    def _visible_tags(self) -> tuple[str, ...]:
+        """Return tags carried by transactions visible in every application view."""
+        return self.statement.tags_for(self._select_transactions(TransactionView.ALL))
+
     def _show_transactions(self, view: TransactionView) -> None:
         """Populate the table with transactions from one view."""
-        selected = self.statement.select(view)
+        selected = self._select_transactions(view)
+        unprocessed_count = len(self._select_transactions(TransactionView.UNPROCESSED))
+        processed_count = len(self._select_transactions(TransactionView.PROCESSED))
+        total_count = len(self._select_transactions(TransactionView.ALL))
         summary = (
-            f"{len(selected):,} shown · {self.statement.unprocessed_count:,} unprocessed · "
-            f"{self.statement.processed_count:,} processed · "
-            f"{len(self.statement.transactions):,} total"
+            f"{len(selected):,} shown · {unprocessed_count:,} unprocessed · "
+            f"{processed_count:,} processed · {total_count:,} total"
         )
         self.query_one("#statements TransactionResults", TransactionResults).show(
             selected,
@@ -624,7 +661,13 @@ class DollarbyApp(App[None]):
     def _show_tag_transactions(self, tag: str | None) -> None:
         """Populate the tag browser for one highlighted tag."""
         selected = (
-            self.statement.transactions.iloc[0:0] if tag is None else self.statement.select_tag(tag)
+            self.statement.transactions.iloc[0:0]
+            if tag is None
+            else self.statement.select_tag(
+                tag,
+                hidden_tags=self._hidden_tags,
+                include_hidden=self._show_hidden_tags,
+            )
         )
         summary = "No tags in this statement" if tag is None else f"{len(selected):,} shown · {tag}"
         self.query_one("#tag-results", TransactionResults).show(selected, summary=summary)

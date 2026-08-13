@@ -32,6 +32,7 @@ def test_nab_processor_defines_export_and_match_order() -> None:
     assert processor.schema_version == PROCESSOR_SCHEMA_VERSION
     assert processor.source_column("date") == "Date"
     assert processor.statement.dates.format == "%d %b %y"
+    assert processor.tagging.hidden_tags == ("alcohol",)
     assert tuple(rule.column for rule in processor.tagging.rules) == (
         "merchant_name",
         "transaction_details",

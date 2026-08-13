@@ -109,6 +109,39 @@ async def test_tag_list_filters_transactions(
         assert str(total.content) == "Total: $-2.00"
 
 
+async def test_h_toggles_ignored_transactions_globally(
+    hidden_tagged_statement: Statement,
+    processor_document: ProcessorDocument,
+) -> None:
+    """Share hidden-tag visibility between Statements, Tags, and future app views."""
+    app = DollarbyApp(hidden_tagged_statement, processor_document)
+    binding = next(binding for binding in DollarbyApp.BINDINGS if binding.key == "h")
+
+    async with app.run_test() as pilot:
+        statement_table = app.query_one("#transactions", TransactionTable)
+        statement_total = app.query_one("#total", Static)
+        tag_list = app.query_one("#tag-list", TagList)
+
+        assert binding.description == "Toggle ignored"
+        assert statement_table.row_count == 1
+        assert str(statement_total.content) == "Total: $-2.00"
+        assert tag_list.tags == ()
+
+        await pilot.press("h", "2")
+
+        tag_table = app.query_one("#tag-transactions", TransactionTable)
+        assert statement_table.row_count == len(hidden_tagged_statement.transactions)
+        assert str(statement_total.content) == "Total: $-3.00"
+        assert tag_list.tags == ("Alcohol",)
+        assert tag_table.row_count == 1
+
+        await pilot.press("h", "1")
+
+        assert tag_list.tags == ()
+        assert tag_table.row_count == 0
+        assert statement_table.row_count == 1
+
+
 async def test_add_tag_dialog_is_prefilled_from_selected_transaction(
     statement: Statement,
     processor_document: ProcessorDocument,

@@ -59,26 +59,61 @@ class Statement:
     @property
     def tags(self) -> tuple[str, ...]:
         """Return every transaction tag in case-insensitive alphabetical order."""
-        tag_sets = cast("list[frozenset[str]]", self.transactions["tags"].tolist())
+        return self.tags_for(self.transactions)
+
+    def tags_for(self, transactions: pd.DataFrame) -> tuple[str, ...]:
+        """Return tags carried by one transaction selection in display order."""
+        tag_sets = cast("list[frozenset[str]]", transactions["tags"].tolist())
         tags = {tag for transaction_tags in tag_sets for tag in transaction_tags}
         return tuple(sorted(tags, key=lambda tag: (tag.casefold(), tag)))
 
-    def select(self, view: TransactionView) -> pd.DataFrame:
-        """Select transactions for a processing-state view."""
+    def select(
+        self,
+        view: TransactionView,
+        *,
+        hidden_tags: tuple[str, ...] = (),
+        include_hidden: bool = False,
+    ) -> pd.DataFrame:
+        """Select one processing state, excluding hidden-tagged rows by default."""
+        mask = self._visible_mask(hidden_tags, include_hidden=include_hidden)
         if view is TransactionView.ALL:
-            return self.transactions
+            return self.transactions.loc[mask]
 
-        mask = self.processed_mask
+        processing_mask = self.processed_mask
         if view is TransactionView.UNPROCESSED:
-            mask = ~mask
-        return self.transactions.loc[mask]
+            processing_mask = ~processing_mask
+        return self.transactions.loc[mask & processing_mask]
 
-    def select_tag(self, tag: str) -> pd.DataFrame:
-        """Select transactions carrying one tag."""
-        mask = self.transactions["tags"].map(
+    def select_tag(
+        self,
+        tag: str,
+        *,
+        hidden_tags: tuple[str, ...] = (),
+        include_hidden: bool = False,
+    ) -> pd.DataFrame:
+        """Select visible transactions carrying one tag."""
+        tag_mask = self.transactions["tags"].map(
             lambda transaction_tags: tag in cast("frozenset[str]", transaction_tags),
         )
-        return self.transactions.loc[mask]
+        visible_mask = self._visible_mask(hidden_tags, include_hidden=include_hidden)
+        return self.transactions.loc[tag_mask & visible_mask]
+
+    def _visible_mask(
+        self,
+        hidden_tags: tuple[str, ...],
+        *,
+        include_hidden: bool,
+    ) -> pd.Series[bool]:
+        """Return rows which do not carry any configured hidden tag."""
+        if include_hidden or not hidden_tags:
+            return pd.Series(data=True, index=self.transactions.index, dtype="bool")
+
+        hidden = frozenset(tag.casefold() for tag in hidden_tags)
+        return self.transactions["tags"].map(
+            lambda transaction_tags: hidden.isdisjoint(
+                tag.casefold() for tag in cast("frozenset[str]", transaction_tags)
+            ),
+        )
 
     def reprocess(self, processor: StatementProcessor) -> int:
         """Recalculate all tags and return the number of rows whose tags changed."""

@@ -211,6 +211,25 @@ def test_statement_lists_and_selects_tags(statement: Statement) -> None:
     assert list(tagged_statement.select_tag("beta")["source_row"]) == [3]
 
 
+def test_statement_excludes_hidden_tags_case_insensitively(
+    hidden_tagged_statement: Statement,
+) -> None:
+    """Hide an entire transaction carrying a configured tag unless explicitly included."""
+    hidden_tags = ("alcohol",)
+
+    visible = hidden_tagged_statement.select(TransactionView.ALL, hidden_tags=hidden_tags)
+    included = hidden_tagged_statement.select(
+        TransactionView.ALL,
+        hidden_tags=hidden_tags,
+        include_hidden=True,
+    )
+
+    assert list(visible["source_row"]) == [3]
+    assert list(included["source_row"]) == [2, 3]
+    assert hidden_tagged_statement.tags_for(visible) == ()
+    assert hidden_tagged_statement.select_tag("Alcohol", hidden_tags=hidden_tags).empty
+
+
 def test_statement_reprocesses_with_an_added_case_insensitive_rule(
     statement: Statement,
     processor: StatementProcessor,

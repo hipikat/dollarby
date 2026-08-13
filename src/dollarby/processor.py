@@ -149,6 +149,7 @@ class TaggingSettings(ProcessorModel):
     """Configure ordered automatic transaction tagging."""
 
     case_sensitive: StrictBool
+    hidden_tags: tuple[NonEmptyString, ...]
     rules: tuple[ColumnRules, ...]
 
 
@@ -222,6 +223,7 @@ class StatementProcessor(ProcessorModel):
 
         tagging = TaggingSettings(
             case_sensitive=self.tagging.case_sensitive,
+            hidden_tags=self.tagging.hidden_tags,
             rules=tuple(updated_groups),
         )
         return type(self)(
