@@ -29,7 +29,7 @@ _default:
 # Run a Python command
 [group('python')]
 py *args='':
-    uv run {{ uv_sync }} $UV_FLAGS python {{ args }}
+    uv run {{ uv_sync }} python {{ args }}
 
 ### Environment
 
@@ -60,16 +60,16 @@ update:
 
 ### Linting
 
-# Run Ruff linting and fix any auto-fixable issues
-[group('development')]
-lint-python:
-    uv run --frozen ruff check . --fix
-    uv run --frozen ruff format .
-
 # Format the Justfile (Note: Marked as 'Unstable!')
 [group('development')]
 lint-just:
     just --fmt --unstable
+
+# Run Ruff linting and formatting, and fix any auto-fixable issues
+[group('development')]
+lint-python:
+    uv run --frozen ruff check . --fix
+    uv run --frozen ruff format .
 
 # Run all linting commands across the project
 [group('development')]
@@ -114,7 +114,7 @@ pre-commit:
     fi
     exec uv run --frozen pre-commit run --files "${files[@]}"
 
-# Perform pre-commit checks, and git-check on all modified and staged files
+# Perform pre-commit checks and git-check all modified and staged files
 [group('development')]
 check:
     git diff --cached --check
