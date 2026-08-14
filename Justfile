@@ -63,7 +63,8 @@ update:
 # Run Ruff linting and fix any auto-fixable issues
 [group('development')]
 lint-python:
-    ruff check . --fix
+    uv run --frozen ruff check . --fix
+    uv run --frozen ruff format .
 
 # Format the Justfile (Note: Marked as 'Unstable!')
 [group('development')]
@@ -73,18 +74,80 @@ lint-just:
 # Run all linting commands across the project
 [group('development')]
 lint:
-    just lint-python
     just lint-just
-
+    just lint-python
 
 ### Workflow
 
 # Run the project's PyTest suite
 [group('development')]
 test:
-  uv run pytest
+    uv run --frozen pytest
 
-# Run pre-commit checks (and fixes) across the whole project
+# Run pre-commit on modified, staged, and untracked files
+[group('development')]
+pre-commit:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    files=()
+    while IFS= read -r -d '' entry; do
+        # Skip deleted files
+        case $entry in
+            "D  "*|" D "*)
+                continue
+                ;;
+        esac
+
+        # Strip Git's two-character status and following space.
+        path=${entry#?? }
+
+        # Skip nonexistent paths, but preserve broken symlinks.
+        [ -e "$path" ] || [ -L "$path" ] || continue
+
+        files+=("$path")
+    done < <(
+        # Get changed and untracked paths as NUL-delimited status records.
+        git status --porcelain=v1 -z --untracked-files=all --no-renames
+    )
+    if ((${#files[@]} == 0)); then
+        exec uv run --frozen pre-commit run ty
+    fi
+    exec uv run --frozen pre-commit run --files "${files[@]}"
+
+# Perform pre-commit checks, and git-check on all modified and staged files
 [group('development')]
 check:
-  uv run pre-commit run --all-files
+    git diff --cached --check
+    git diff --check
+    just pre-commit
+
+# Apply auto-fixes and run all preflight checks
+[group('development')]
+preflight:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    restage=()
+    while IFS= read -r -d '' entry; do
+        index_status=${entry:0:1}
+        worktree_status=${entry:1:1}
+        path=${entry:3}
+
+        # Remember files which are staged, but not partially staged.
+        if [[ $index_status != ' ' && $worktree_status == ' ' ]]; then
+            restage+=("$path")
+        fi
+    done < <(
+        git status --porcelain=v1 -z --untracked-files=no --no-renames
+    )
+    restage_files() {
+        if ((${#restage[@]})); then
+            git add -- "${restage[@]}"
+        fi
+    }
+    # Preserve the original staging intent if a later auto-fixing hook exits nonzero.
+    trap restage_files EXIT
+    just lint
+    restage_files
+    just check
+    trap - EXIT
+    just test
