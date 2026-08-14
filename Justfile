@@ -109,6 +109,9 @@ pre-commit:
         # Get changed and untracked paths as NUL-delimited status records.
         git status --porcelain=v1 -z --untracked-files=all --no-renames
     )
+    if ((${#files[@]} == 0)); then
+        exec uv run --frozen pre-commit run --files
+    fi
     exec uv run --frozen pre-commit run --files "${files[@]}"
 
 # Perform pre-commit checks, and git-check on all modified and staged files
@@ -141,10 +144,24 @@ preflight:
             git add -- "${restage[@]}"
         fi
     }
+    run_quietly() {
+        local label=$1
+        local output
+        local status
+        shift
+        if output=$("$@" 2>&1); then
+            printf '✓ %s\n' "$label"
+            return
+        else
+            status=$?
+            printf '%s\n' "$output" >&2
+            return "$status"
+        fi
+    }
     # Preserve the original staging intent if a later auto-fixing hook exits nonzero.
     trap restage_files EXIT
     just lint
     restage_files
-    just check
+    run_quietly "Checks passed" just check
     trap - EXIT
-    just test
+    run_quietly "Tests passed" just test
