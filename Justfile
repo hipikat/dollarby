@@ -110,7 +110,7 @@ pre-commit:
         git status --porcelain=v1 -z --untracked-files=all --no-renames
     )
     if ((${#files[@]} == 0)); then
-        exec uv run --frozen pre-commit run --files
+        exec uv run --frozen ty check
     fi
     exec uv run --frozen pre-commit run --files "${files[@]}"
 
