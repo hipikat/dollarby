@@ -115,30 +115,37 @@ async def test_h_toggles_ignored_transactions_globally(
 ) -> None:
     """Share hidden-tag visibility between Statements, Tags, and future app views."""
     app = DollarbyApp(hidden_tagged_statement, processor_document)
-    binding = next(binding for binding in DollarbyApp.BINDINGS if binding.key == "h")
 
     async with app.run_test() as pilot:
         statement_table = app.query_one("#transactions", TransactionTable)
         statement_total = app.query_one("#total", Static)
         tag_list = app.query_one("#tag-list", TagList)
 
-        assert binding.description == "Toggle ignored"
+        assert app.active_bindings["h"].binding.description == "Show ignored"
         assert statement_table.row_count == 1
         assert str(statement_total.content) == "Total: $-2.00"
         assert tag_list.tags == ()
 
-        await pilot.press("h", "2")
+        await pilot.press("h")
 
+        assert app.active_bindings["h"].binding.description == "Hide ignored"
         tag_table = app.query_one("#tag-transactions", TransactionTable)
         assert statement_table.row_count == len(hidden_tagged_statement.transactions)
         assert str(statement_total.content) == "Total: $-3.00"
         assert tag_list.tags == ("Alcohol",)
+
+        await pilot.press("2")
+
         assert tag_table.row_count == 1
 
-        await pilot.press("h", "1")
+        await pilot.press("h")
 
+        assert app.active_bindings["h"].binding.description == "Show ignored"
         assert tag_list.tags == ()
         assert tag_table.row_count == 0
+
+        await pilot.press("1")
+
         assert statement_table.row_count == 1
 
 

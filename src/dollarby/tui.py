@@ -476,7 +476,8 @@ class DollarbyApp(App[None]):
         Binding("1", "show_tab('statements')", "Statements", priority=True),
         Binding("2", "show_tab('tags')", "Tags", priority=True),
         Binding("a", "add_tag", "Add tag"),
-        Binding("h", "toggle_ignored", "Toggle ignored"),
+        Binding("h", "show_ignored", "Show ignored"),
+        Binding("h", "hide_ignored", "Hide ignored"),
         Binding("q", "quit", "Quit"),
         Binding("escape", "quit", "Quit", show=False),
     ]
@@ -552,14 +553,32 @@ class DollarbyApp(App[None]):
         """Activate one application tab by identifier."""
         self.query_one("#views", TabbedContent).active = tab_id
 
-    async def action_toggle_ignored(self) -> None:
-        """Toggle application-wide visibility of hidden-tagged transactions."""
+    @override
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Expose the ignored-transaction action matching current visibility."""
+        if action == "show_ignored":
+            return not self._show_hidden_tags
+        if action == "hide_ignored":
+            return self._show_hidden_tags
+        return super().check_action(action, parameters)
+
+    async def action_show_ignored(self) -> None:
+        """Show hidden-tagged transactions application-wide."""
+        await self._set_ignored_visibility(show=True)
+
+    async def action_hide_ignored(self) -> None:
+        """Hide hidden-tagged transactions application-wide."""
+        await self._set_ignored_visibility(show=False)
+
+    async def _set_ignored_visibility(self, *, show: bool) -> None:
+        """Set application-wide visibility of hidden-tagged transactions."""
         tag_list = self.query_one("#tag-list", TagList)
         active_tag = tag_list.active_tag
-        self._show_hidden_tags = not self._show_hidden_tags
+        self._show_hidden_tags = show
+        self.refresh_bindings()
         await self._refresh_views(active_tag=active_tag)
         self._focus_active_view()
-        state = "Showing" if self._show_hidden_tags else "Hiding"
+        state = "Showing" if show else "Hiding"
         self.notify(f"{state} ignored transactions")
 
     def action_add_tag(self) -> None:
