@@ -28,13 +28,15 @@ dev = [
     "pre-commit>=4.6.1",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.16.2",
     "ty>=0.0.68",
 ]
 
 ### Pytest
 [tool.pytest.ini_options]
-addopts = ["-q", "--strict-config", "--strict-markers"]
+# Four workers currently beat ten by avoiding repeated Python/Textual startup overhead.
+addopts = ["-n", "4", "--strict-config", "--strict-markers"]
 asyncio_mode = "strict"
 testpaths = ["tests"]
 
