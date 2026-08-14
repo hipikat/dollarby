@@ -109,9 +109,6 @@ pre-commit:
         # Get changed and untracked paths as NUL-delimited status records.
         git status --porcelain=v1 -z --untracked-files=all --no-renames
     )
-    if ((${#files[@]} == 0)); then
-        exec uv run --frozen pre-commit run ty
-    fi
     exec uv run --frozen pre-commit run --files "${files[@]}"
 
 # Perform pre-commit checks, and git-check on all modified and staged files
